@@ -24,9 +24,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		61B36A522FCFAF1300DDC2E2 /* palah.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = palah.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		61B36A612FCFAF1500DDC2E2 /* palahTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = palahTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		61B36A6B2FCFAF1500DDC2E2 /* palahUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = palahUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		61B36A522FCFAF1300DDC2E2 /* Palah.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Palah.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		61B36A612FCFAF1500DDC2E2 /* PalahTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PalahTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		61B36A6B2FCFAF1500DDC2E2 /* PalahUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PalahUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -85,9 +85,9 @@
 		61B36A532FCFAF1300DDC2E2 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				61B36A522FCFAF1300DDC2E2 /* palah.app */,
-				61B36A612FCFAF1500DDC2E2 /* palahTests.xctest */,
-				61B36A6B2FCFAF1500DDC2E2 /* palahUITests.xctest */,
+				61B36A522FCFAF1300DDC2E2 /* Palah.app */,
+				61B36A612FCFAF1500DDC2E2 /* PalahTests.xctest */,
+				61B36A6B2FCFAF1500DDC2E2 /* PalahUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,9 +95,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		61B36A512FCFAF1300DDC2E2 /* palah */ = {
+		61B36A512FCFAF1300DDC2E2 /* Palah */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 61B36A752FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "palah" */;
+			buildConfigurationList = 61B36A752FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "Palah" */;
 			buildPhases = (
 				61B36A4E2FCFAF1300DDC2E2 /* Sources */,
 				61B36A4F2FCFAF1300DDC2E2 /* Frameworks */,
@@ -110,16 +110,16 @@
 			fileSystemSynchronizedGroups = (
 				61B36A542FCFAF1300DDC2E2 /* palah */,
 			);
-			name = palah;
+			name = Palah;
 			packageProductDependencies = (
 			);
 			productName = palah;
-			productReference = 61B36A522FCFAF1300DDC2E2 /* palah.app */;
+			productReference = 61B36A522FCFAF1300DDC2E2 /* Palah.app */;
 			productType = "com.apple.product-type.application";
 		};
-		61B36A602FCFAF1500DDC2E2 /* palahTests */ = {
+		61B36A602FCFAF1500DDC2E2 /* PalahTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 61B36A782FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "palahTests" */;
+			buildConfigurationList = 61B36A782FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "PalahTests" */;
 			buildPhases = (
 				61B36A5D2FCFAF1500DDC2E2 /* Sources */,
 				61B36A5E2FCFAF1500DDC2E2 /* Frameworks */,
@@ -133,16 +133,16 @@
 			fileSystemSynchronizedGroups = (
 				61B36A642FCFAF1500DDC2E2 /* palahTests */,
 			);
-			name = palahTests;
+			name = PalahTests;
 			packageProductDependencies = (
 			);
 			productName = palahTests;
-			productReference = 61B36A612FCFAF1500DDC2E2 /* palahTests.xctest */;
+			productReference = 61B36A612FCFAF1500DDC2E2 /* PalahTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		61B36A6A2FCFAF1500DDC2E2 /* palahUITests */ = {
+		61B36A6A2FCFAF1500DDC2E2 /* PalahUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 61B36A7B2FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "palahUITests" */;
+			buildConfigurationList = 61B36A7B2FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "PalahUITests" */;
 			buildPhases = (
 				61B36A672FCFAF1500DDC2E2 /* Sources */,
 				61B36A682FCFAF1500DDC2E2 /* Frameworks */,
@@ -156,11 +156,11 @@
 			fileSystemSynchronizedGroups = (
 				61B36A6E2FCFAF1500DDC2E2 /* palahUITests */,
 			);
-			name = palahUITests;
+			name = PalahUITests;
 			packageProductDependencies = (
 			);
 			productName = palahUITests;
-			productReference = 61B36A6B2FCFAF1500DDC2E2 /* palahUITests.xctest */;
+			productReference = 61B36A6B2FCFAF1500DDC2E2 /* PalahUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -186,7 +186,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 61B36A4D2FCFAF1300DDC2E2 /* Build configuration list for PBXProject "palah" */;
+			buildConfigurationList = 61B36A4D2FCFAF1300DDC2E2 /* Build configuration list for PBXProject "Palah" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -200,9 +200,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				61B36A512FCFAF1300DDC2E2 /* palah */,
-				61B36A602FCFAF1500DDC2E2 /* palahTests */,
-				61B36A6A2FCFAF1500DDC2E2 /* palahUITests */,
+				61B36A512FCFAF1300DDC2E2 /* Palah */,
+				61B36A602FCFAF1500DDC2E2 /* PalahTests */,
+				61B36A6A2FCFAF1500DDC2E2 /* PalahUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -258,12 +258,12 @@
 /* Begin PBXTargetDependency section */
 		61B36A632FCFAF1500DDC2E2 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 61B36A512FCFAF1300DDC2E2 /* palah */;
+			target = 61B36A512FCFAF1300DDC2E2 /* Palah */;
 			targetProxy = 61B36A622FCFAF1500DDC2E2 /* PBXContainerItemProxy */;
 		};
 		61B36A6D2FCFAF1500DDC2E2 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 61B36A512FCFAF1300DDC2E2 /* palah */;
+			target = 61B36A512FCFAF1300DDC2E2 /* Palah */;
 			targetProxy = 61B36A6C2FCFAF1500DDC2E2 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -395,9 +395,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -405,7 +404,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.devogopan.palah;
+				PRODUCT_BUNDLE_IDENTIFIER = com.devogopan.Palah;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -425,9 +424,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -435,7 +433,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.devogopan.palah;
+				PRODUCT_BUNDLE_IDENTIFIER = com.devogopan.Palah;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -463,7 +461,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/palah.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/palah";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Palah.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Palah";
 			};
 			name = Debug;
 		};
@@ -483,7 +481,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/palah.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/palah";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Palah.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Palah";
 			};
 			name = Release;
 		};
@@ -526,7 +524,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		61B36A4D2FCFAF1300DDC2E2 /* Build configuration list for PBXProject "palah" */ = {
+		61B36A4D2FCFAF1300DDC2E2 /* Build configuration list for PBXProject "Palah" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				61B36A732FCFAF1500DDC2E2 /* Debug */,
@@ -535,7 +533,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		61B36A752FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "palah" */ = {
+		61B36A752FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "Palah" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				61B36A762FCFAF1500DDC2E2 /* Debug */,
@@ -544,7 +542,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		61B36A782FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "palahTests" */ = {
+		61B36A782FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "PalahTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				61B36A792FCFAF1500DDC2E2 /* Debug */,
@@ -553,7 +551,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		61B36A7B2FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "palahUITests" */ = {
+		61B36A7B2FCFAF1500DDC2E2 /* Build configuration list for PBXNativeTarget "PalahUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				61B36A7C2FCFAF1500DDC2E2 /* Debug */,
