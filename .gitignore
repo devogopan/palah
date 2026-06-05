@@ -19,3 +19,4 @@ build/
 
 # Runtime logs
 /tmp/palah.log
+xcshareddata/
