@@ -1,0 +1,66 @@
+{
+  "manifest_version": 3,
+  "name": "Palah",
+  "version": "0.1.0",
+  "description": "Endpoint-native AI governance — intercepts prompts before they leave your device.",
+
+  "permissions": ["storage", "activeTab"],
+
+  "host_permissions": [
+    "http://localhost:45678/*",
+    "https://chatgpt.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://perplexity.ai/*",
+    "https://www.perplexity.ai/*",
+    "https://grok.com/*",
+    "https://x.com/*",
+    "https://deepseek.com/*",
+    "https://chat.deepseek.com/*",
+    "https://copilot.microsoft.com/*",
+    "https://www.bing.com/*",
+    "https://meta.ai/*",
+    "https://poe.com/*",
+    "https://you.com/*",
+    "https://character.ai/*",
+    "https://mistral.ai/*",
+    "https://chat.mistral.ai/*",
+    "https://huggingface.co/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://perplexity.ai/*",
+        "https://www.perplexity.ai/*",
+        "https://grok.com/*",
+        "https://x.com/*",
+        "https://deepseek.com/*",
+        "https://chat.deepseek.com/*",
+        "https://copilot.microsoft.com/*",
+        "https://www.bing.com/*",
+        "https://meta.ai/*",
+        "https://poe.com/*",
+        "https://you.com/*",
+        "https://character.ai/*",
+        "https://mistral.ai/*",
+        "https://chat.mistral.ai/*",
+        "https://huggingface.co/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Palah"
+  }
+}

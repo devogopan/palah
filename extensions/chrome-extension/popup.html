@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      width: 380px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-size: 13px;
+    }
+
+    .header {
+      padding: 12px 16px;
+      border-bottom: 1px solid #1e293b;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .header-left { display: flex; align-items: center; gap: 8px; }
+    .logo { font-size: 14px; font-weight: 700; color: #f8fafc; letter-spacing: -0.3px; }
+    .subtitle { font-size: 11px; color: #475569; }
+
+    .actions { display: flex; gap: 8px; align-items: center; }
+    .count { font-size: 11px; color: #64748b; }
+
+    button {
+      font-size: 11px;
+      color: #64748b;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      cursor: pointer;
+      padding: 3px 8px;
+    }
+    button:hover { color: #94a3b8; background: #273549; }
+
+    .empty {
+      padding: 40px 20px;
+      text-align: center;
+      color: #475569;
+      line-height: 1.6;
+    }
+    .empty strong { display: block; color: #64748b; margin-bottom: 6px; }
+
+    .capture {
+      padding: 10px 16px;
+      border-bottom: 1px solid #1e293b;
+    }
+    .capture:hover { background: #111827; }
+
+    .capture-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+
+    .tool {
+      font-size: 10px;
+      font-weight: 600;
+      color: #818cf8;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .meta-right { display: flex; gap: 8px; align-items: center; }
+    .source { font-size: 10px; color: #334155; }
+    .time { font-size: 10px; color: #475569; }
+
+    .text {
+      font-size: 12px;
+      color: #94a3b8;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+      max-height: 80px;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-left">
+      <span class="logo">Palah</span>
+      <span class="subtitle">AI prompt warden</span>
+    </div>
+    <div class="actions">
+      <span class="count" id="count"></span>
+      <button id="clearBtn">Clear</button>
+    </div>
+  </div>
+
+  <div id="list"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
