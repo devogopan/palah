@@ -19,9 +19,12 @@ struct PalahApp: App {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var reader: AccessibilityReader?
+    var server: PromptServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)  // hide from Dock
+        server = PromptServer()
+        server?.start()
         reader = AccessibilityReader()
         reader?.start()
     }

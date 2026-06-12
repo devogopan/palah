@@ -4,15 +4,18 @@
 //
 //  Created by Gopakumar N on 03/06/26.
 //
+//  Handles prompt interception for native macOS apps and IDE AI plugins via the
+//  Accessibility API. Browser-based AI tools (ChatGPT, Gemini, Claude.ai, etc.)
+//  are handled by the Palah Chrome extension (palah-extension/).
 
 import Cocoa
 import ApplicationServices
 
 // MARK: - Logging
 
-private let logPath = "/tmp/palah.log"
+let logPath = "/tmp/palah.log"
 
-private func log(_ message: String) {
+func log(_ message: String) {
     print(message)
     let line = message + "\n"
     guard let data = line.data(using: .utf8) else { return }
@@ -24,9 +27,15 @@ private func log(_ message: String) {
     }
 }
 
+func timestamp() -> String {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss"
+    return f.string(from: Date())
+}
+
 // MARK: - PromptInterceptor Protocol
 //
-// To add support for a new app or browser:
+// To add support for a new native app:
 //   1. Create a struct conforming to PromptInterceptor
 //   2. Implement canHandle() — return true for the relevant bundle IDs
 //   3. Implement read() — return (text, role) for the focused element
@@ -57,17 +66,10 @@ private func role(of el: AXUIElement) -> String {
     return r as? String ?? ""
 }
 
-private func windows(of appEl: AXUIElement) -> [AXUIElement] {
-    var w: AnyObject?
-    guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &w) == .success,
-          let list = w as? [AXUIElement] else { return [] }
-    return list
-}
-
 // Reads text from an AX element.
-// Tries: kAXValueAttribute → kAXSelectedTextAttribute → child traversal.
-// Child traversal handles browser contenteditable divs (ChatGPT, Gemini, Claude.ai, etc.)
-// which use ProseMirror/Quill and store text in nested AXStaticText children.
+// Tries kAXValueAttribute → kAXSelectedTextAttribute → child traversal.
+// Child traversal handles editors that store text in nested AXStaticText children
+// (e.g. VS Code chat panels using ProseMirror-style rendering).
 private func textFrom(_ el: AXUIElement, depth: Int = 0) -> String? {
     var value: AnyObject?
     if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &value) == .success,
@@ -85,163 +87,6 @@ private func textFrom(_ el: AXUIElement, depth: Int = 0) -> String? {
     let parts = childList.compactMap { textFrom($0, depth: depth + 1) }
     let joined = parts.joined(separator: "\n")
     return joined.isEmpty ? nil : joined
-}
-
-// Searches app → windows for a focused element with text.
-// The window-level search is what exposes browser contenteditable elements.
-private func readFromAXTree(appEl: AXUIElement) -> (text: String?, role: String) {
-    var bestRole = ""
-    for target in ([appEl] + windows(of: appEl)) {
-        guard let el = focusedElement(in: target) else { continue }
-        let r = role(of: el)
-        if !r.isEmpty { bestRole = r }
-        if let text = textFrom(el) { return (text, r) }
-    }
-    return (nil, bestRole)
-}
-
-// Searches for an element with kAXFocusedAttribute = true by walking the AX tree.
-// Used as a fallback when kAXFocusedUIElementAttribute doesn't work (e.g. Firefox/Gecko).
-// Skips container roles (Window, Application, ScrollArea) which are "focused" in the
-// sense of being active, not in the sense of receiving text input.
-// maxNodes caps traversal cost — ~200 nodes is typically enough to find a focused field.
-private let containerRoles: Set<String> = ["AXWindow", "AXApplication", "AXSheet", "AXScrollArea", "AXSplitGroup"]
-
-private func findFocusedByAttribute(in el: AXUIElement, remaining: inout Int, maxDepth: Int) -> AXUIElement? {
-    guard remaining > 0, maxDepth > 0 else { return nil }
-    remaining -= 1
-
-    var roleObj: AnyObject?
-    AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleObj)
-    let elRole = roleObj as? String ?? ""
-
-    if !containerRoles.contains(elRole) {
-        var focused: AnyObject?
-        if AXUIElementCopyAttributeValue(el, kAXFocusedAttribute as CFString, &focused) == .success,
-           (focused as? Bool) == true { return el }
-    }
-
-    var children: AnyObject?
-    guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children) == .success,
-          let childList = children as? [AXUIElement] else { return nil }
-
-    for child in childList {
-        if let found = findFocusedByAttribute(in: child, remaining: &remaining, maxDepth: maxDepth - 1) {
-            return found
-        }
-    }
-    return nil
-}
-
-// MARK: - Chromium Browsers
-// Covers: Chrome, Brave, Microsoft Edge, Arc, Vivaldi
-// Requires AXManualAccessibility = true to activate Chrome's AX tree.
-// Uses window-level focused element + child traversal for contenteditable (ChatGPT, Gemini, etc.)
-
-private let chromiumBundleIDs: Set<String> = [
-    "com.google.Chrome",
-    "com.google.Chrome.beta",
-    "com.google.Chrome.canary",
-    "com.brave.Browser",
-    "com.microsoft.edgemac",
-    "company.thebrowser.Browser",       // Arc
-    "com.operasoftware.Opera",
-    "com.vivaldi.Vivaldi",
-]
-
-struct ChromiumInterceptor: PromptInterceptor {
-    let name = "Chromium"
-
-    // Backs off after a permission denial; retries after 30 seconds in case user grants it.
-    static var jsBlockedUntil: Date = .distantPast
-
-    func canHandle(_ app: NSRunningApplication) -> Bool {
-        chromiumBundleIDs.contains(app.bundleIdentifier ?? "")
-    }
-
-    func read(from app: NSRunningApplication) -> (text: String?, role: String) {
-        let appEl = axAppElement(for: app)
-        AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, true as CFTypeRef)
-
-        // AX works for native Chrome elements (URL bar, find bar, etc.)
-        var bestRole = ""
-        for target in ([appEl] + windows(of: appEl)) {
-            guard let el = focusedElement(in: target) else { continue }
-            let r = role(of: el)
-            if !r.isEmpty { bestRole = r }
-            if let text = textFrom(el) { return (text, r) }
-        }
-
-        // AX can't reach web contenteditable (ChatGPT, Gemini, Claude.ai, etc.)
-        // Fall back to JavaScript via AppleScript.
-        // Requires: System Settings → Privacy & Security → Automation → Palah → Google Chrome ✓
-        guard Date() > ChromiumInterceptor.jsBlockedUntil else { return (nil, bestRole) }
-
-        if let text = readViaJS(appName: app.localizedName ?? "Google Chrome") {
-            return (text, "web-input")
-        }
-
-        return (nil, bestRole)
-    }
-
-    private func readViaJS(appName: String) -> String? {
-        let js = "document.activeElement.isContentEditable ? document.activeElement.innerText.trim() : ''"
-        let src = "tell application \"\(appName)\" to execute active tab of front window javascript \"\(js)\""
-        var err: NSDictionary?
-        let result = NSAppleScript(source: src)?.executeAndReturnError(&err)
-        if let e = err {
-            let code = (e[NSAppleScript.errorNumber] as? Int) ?? 0
-            if code == -1743 {
-                ChromiumInterceptor.jsBlockedUntil = Date().addingTimeInterval(30)
-                log("[js] Automation permission denied — grant it in System Settings → Privacy & Security → Automation → Palah → Google Chrome (will retry in 30s)")
-            } else {
-                log("[js] error \(code): \(e[NSAppleScript.errorBriefMessage] ?? "unknown")")
-            }
-            return nil
-        }
-        let raw = result?.stringValue ?? ""
-        log("[js] raw result: '\(raw)'")
-        guard !raw.isEmpty else { return nil }
-        return raw
-    }
-}
-
-// MARK: - Safari
-// Uses WebKit's native AX tree; standard queries work without special activation.
-
-struct SafariInterceptor: PromptInterceptor {
-    let name = "Safari"
-
-    func canHandle(_ app: NSRunningApplication) -> Bool {
-        let id = app.bundleIdentifier ?? ""
-        return id == "com.apple.Safari" || id == "com.apple.SafariTechnologyPreview"
-    }
-
-    func read(from app: NSRunningApplication) -> (text: String?, role: String) {
-        readFromAXTree(appEl: axAppElement(for: app))
-    }
-}
-
-// MARK: - Firefox
-// Firefox on macOS Sequoia does not expose its Gecko web content via the standard
-// macOS Accessibility API. The AX tree is limited to window frame elements only,
-// regardless of accessibility.force_disabled setting or AXObserver registration.
-//
-// Phase 2 fix: Firefox WebExtension that sends prompt text to a local Palah HTTP endpoint.
-// This is the standard approach used by enterprise browser security tools for Firefox.
-
-struct FirefoxInterceptor: PromptInterceptor {
-    let name = "Firefox"
-
-    func canHandle(_ app: NSRunningApplication) -> Bool {
-        (app.bundleIdentifier ?? "").hasPrefix("org.mozilla")
-    }
-
-    func read(from app: NSRunningApplication) -> (text: String?, role: String) {
-        // Firefox web content is not accessible via macOS AX API on Sequoia.
-        // Interceptor placeholder — will be replaced by WebExtension in Phase 2.
-        return (nil, "")
-    }
 }
 
 // MARK: - VS Code Family (AI coding assistants)
@@ -296,7 +141,7 @@ struct NativeAIAppInterceptor: PromptInterceptor {
 }
 
 // MARK: - Generic AX Fallback
-// Catches anything not handled above: legal/medical/finance AI tools, Slack AI, etc.
+// Catches anything not handled above: specialist AI tools, Slack AI, legal/medical AI apps, etc.
 // This always returns true so it must be last in the registry.
 
 struct GenericAXInterceptor: PromptInterceptor {
@@ -311,33 +156,39 @@ struct GenericAXInterceptor: PromptInterceptor {
     }
 }
 
+// MARK: - Helpers
+
+// Returns true for empty strings and VS Code-style hint/placeholder text.
+// These appear after a submit: "Queue another message…", "⌘ Esc to focus…", etc.
+private func isPlaceholder(_ text: String) -> Bool {
+    text.isEmpty || text.hasSuffix("…") || text.contains("⌘")
+}
+
 // MARK: - AccessibilityReader
 
 class AccessibilityReader {
     // Registry — evaluated top-to-bottom, first match wins.
     // GenericAXInterceptor must stay last.
     private let interceptors: [PromptInterceptor] = [
-        ChromiumInterceptor(),
-        SafariInterceptor(),
-        FirefoxInterceptor(),
         VSCodeFamilyInterceptor(),
         NativeAIAppInterceptor(),
         GenericAXInterceptor(),
     ]
 
     private var lastText = ""
+    private var lastCaptured = ""   // last text we actually logged (dedup)
     private var lastAppName = ""
     private var lastRole = ""
     private var timer: Timer?
 
     func start() {
         try? "".write(toFile: logPath, atomically: true, encoding: .utf8)
-        log("[\(timestamp())] Palah started — watching for AI prompts")
+        log("[\(timestamp())] Palah started — watching native AI apps and IDE plugins")
 
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         AXIsProcessTrustedWithOptions(opts)
 
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             guard let self else { return }
             guard AXIsProcessTrusted() else {
                 log("[\(timestamp())] waiting for Accessibility permission...")
@@ -358,6 +209,7 @@ class AccessibilityReader {
             log("[\(timestamp())] → \(appName)  [\(interceptor.name)]")
             lastAppName = appName
             lastRole = ""
+            lastText = ""
         }
 
         if !role.isEmpty, role != lastRole {
@@ -366,16 +218,16 @@ class AccessibilityReader {
         }
 
         let captured = text ?? ""
-        guard captured != lastText else { return }
-        lastText = captured
-        if !captured.isEmpty {
-            log("[\(timestamp())]   captured: \(captured)")
+
+        // Submit detection: field transitions from real user text to empty or placeholder text.
+        // VS Code replaces typed text with hint text (ending in … or containing ⌘) on submit.
+        if !isPlaceholder(lastText) && isPlaceholder(captured) && lastText != lastCaptured {
+            log("[\(timestamp())] [submit] \(appName)")
+            log("[\(timestamp())]   \(lastText.prefix(300))")
+            lastCaptured = lastText
         }
+
+        lastText = captured
     }
 
-    private func timestamp() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f.string(from: Date())
-    }
 }
