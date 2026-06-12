@@ -27,6 +27,7 @@
 		61B36A522FCFAF1300DDC2E2 /* Palah.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Palah.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		61B36A612FCFAF1500DDC2E2 /* PalahTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PalahTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		61B36A6B2FCFAF1500DDC2E2 /* PalahUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PalahUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		61B36A812FDBE18400DDC2E2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; name = Info.plist; path = Palah/Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -75,6 +76,7 @@
 		61B36A492FCFAF1300DDC2E2 = {
 			isa = PBXGroup;
 			children = (
+				61B36A812FDBE18400DDC2E2 /* Info.plist */,
 				61B36A542FCFAF1300DDC2E2 /* palah */,
 				61B36A642FCFAF1500DDC2E2 /* palahTests */,
 				61B36A6E2FCFAF1500DDC2E2 /* palahUITests */,
@@ -398,6 +400,8 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Palah/Info.plist;
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Palah needs to read AI prompt text from your browser to detect sensitive content before it is sent.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -427,6 +431,8 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Palah/Info.plist;
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Palah needs to read AI prompt text from your browser to detect sensitive content before it is sent.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
