@@ -89,6 +89,117 @@ private func textFrom(_ el: AXUIElement, depth: Int = 0) -> String? {
     return joined.isEmpty ? nil : joined
 }
 
+// MARK: - AI Tool Domain List
+// Single source of truth — mirrors extensions/chrome-extension/manifest.json host_permissions.
+// Add new AI tool domains here AND in the extension manifest to keep both in sync.
+
+let aiToolDomains: Set<String> = [
+    "chatgpt.com",
+    "claude.ai",
+    "gemini.google.com",
+    "perplexity.ai",
+    "www.perplexity.ai",
+    "grok.com",
+    "x.com",
+    "deepseek.com",
+    "chat.deepseek.com",
+    "copilot.microsoft.com",
+    "www.bing.com",
+    "meta.ai",
+    "poe.com",
+    "you.com",
+    "character.ai",
+    "mistral.ai",
+    "chat.mistral.ai",
+    "huggingface.co",
+]
+
+// MARK: - Safari
+// Uses WebKit's native AX tree — no special activation or extra permissions needed.
+// URL-gated via kAXURLAttribute on the AXWebArea element: only reads text when the
+// current page hostname is in aiToolDomains. Mirrors Chrome extension domain scoping.
+
+struct SafariInterceptor: PromptInterceptor {
+    let name = "Safari"
+
+    func canHandle(_ app: NSRunningApplication) -> Bool {
+        let id = app.bundleIdentifier ?? ""
+        return id == "com.apple.Safari" || id == "com.apple.SafariTechnologyPreview"
+    }
+
+    func read(from app: NSRunningApplication) -> (text: String?, role: String) {
+        let appEl = axAppElement(for: app)
+
+        var winObj: AnyObject?
+        let searchRoot: AXUIElement
+        if AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &winObj) == .success,
+           let win = winObj { searchRoot = win as! AXUIElement }
+        else { searchRoot = appEl }
+
+        guard let webArea = findWebArea(in: searchRoot, depth: 0),
+              let host = webAreaHost(webArea),
+              aiToolDomains.contains(host) else { return (nil, "") }
+
+        // Read directly from the prompt input element rather than the focused element.
+        // This lets us detect the field clearing immediately after submit, even when
+        // focus has moved to the response area (AXGroup) or send button (AXButton).
+        if let inputEl = findEditableTextArea(in: webArea) {
+            return (textFrom(inputEl), "AXTextArea")
+        }
+
+        return (nil, "")
+    }
+
+    // Searches the web area for the first editable AXTextArea — the prompt input.
+    // AI tool pages typically have one editable text area: the prompt input.
+    private func findEditableTextArea(in el: AXUIElement, depth: Int = 0) -> AXUIElement? {
+        guard depth < 12 else { return nil }
+        var roleObj: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleObj)
+        if (roleObj as? String) == "AXTextArea" {
+            var enabled: AnyObject?
+            // kAXEnabledAttribute filters out read-only text areas
+            if AXUIElementCopyAttributeValue(el, kAXEnabledAttribute as CFString, &enabled) == .success,
+               (enabled as? Bool) == true { return el }
+        }
+        var children: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children) == .success,
+              let childList = children as? [AXUIElement] else { return nil }
+        for child in childList {
+            if let found = findEditableTextArea(in: child, depth: depth + 1) { return found }
+        }
+        return nil
+    }
+
+    // Reads kAXURLAttribute from an AXWebArea element.
+    private func webAreaHost(_ webArea: AXUIElement) -> String? {
+        var obj: AnyObject?
+        guard AXUIElementCopyAttributeValue(webArea, kAXURLAttribute as CFString, &obj) == .success,
+              let obj else { return nil }
+        let urlStr: String?
+        if let url = obj as? URL         { urlStr = url.absoluteString }
+        else if let url = obj as? NSURL  { urlStr = url.absoluteString }
+        else                             { urlStr = obj as? String }
+        guard let urlStr, let host = URLComponents(string: urlStr)?.host else { return nil }
+        return host
+    }
+
+    private func findWebArea(in el: AXUIElement, depth: Int) -> AXUIElement? {
+        guard depth < 8 else { return nil }
+        var roleObj: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleObj)
+        if (roleObj as? String) == "AXWebArea" { return el }
+
+        var children: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children) == .success,
+              let childList = children as? [AXUIElement] else { return nil }
+        for child in childList {
+            if let found = findWebArea(in: child, depth: depth + 1) { return found }
+        }
+        return nil
+    }
+}
+
 // MARK: - VS Code Family (AI coding assistants)
 // Covers: VS Code (Claude, Copilot, Cursor Chat), Cursor, Windsurf, Zed
 // All are Electron-based; chat panels expose text via AXTextArea.
@@ -160,8 +271,23 @@ struct GenericAXInterceptor: PromptInterceptor {
 
 // Returns true for empty strings and VS Code-style hint/placeholder text.
 // These appear after a submit: "Queue another message…", "⌘ Esc to focus…", etc.
+// AX roles that represent editable text inputs. Only these update lastText.
+// Responses and containers (AXGroup, AXScrollArea, AXStaticText) are excluded.
+private let textInputRoles: Set<String> = ["AXTextArea", "AXTextField", "AXComboBox"]
+
+// Known placeholder strings across major AI tools. Add new ones as discovered.
+private let knownPlaceholders: Set<String> = [
+    "Ask anything",           // ChatGPT
+    "Message ChatGPT",        // ChatGPT
+    "Reply to Claude...",     // Claude.ai
+    "Enter a prompt here",    // Gemini
+    "Message Gemini",         // Gemini
+    "Ask Perplexity",         // Perplexity
+]
+
 private func isPlaceholder(_ text: String) -> Bool {
-    text.isEmpty || text.hasSuffix("…") || text.contains("⌘")
+    let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return t.isEmpty || t.hasSuffix("…") || t.contains("⌘") || knownPlaceholders.contains(t)
 }
 
 // MARK: - AccessibilityReader
@@ -171,6 +297,7 @@ class AccessibilityReader {
     // GenericAXInterceptor must stay last.
     private let interceptors: [PromptInterceptor] = [
         VSCodeFamilyInterceptor(),
+        SafariInterceptor(),
         NativeAIAppInterceptor(),
         GenericAXInterceptor(),
     ]
@@ -219,8 +346,12 @@ class AccessibilityReader {
 
         let captured = text ?? ""
 
-        // Submit detection: field transitions from real user text to empty or placeholder text.
-        // VS Code replaces typed text with hint text (ending in … or containing ⌘) on submit.
+        // Only track text when focus is on an actual input element.
+        // When focus moves to the response area (AXGroup, AXScrollArea, etc.) after submit,
+        // freeze lastText so the user's prompt is preserved until the input field clears.
+        guard textInputRoles.contains(role) else { return }
+
+        // Submit detection: input field transitions from real user text to empty or placeholder.
         if !isPlaceholder(lastText) && isPlaceholder(captured) && lastText != lastCaptured {
             log("[\(timestamp())] [submit] \(appName)")
             log("[\(timestamp())]   \(lastText.prefix(300))")
