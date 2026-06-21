@@ -79,19 +79,32 @@ class PromptServer {
     // MARK: - Request processing
 
     private func processRequest(firstLine: String, body: String, conn: NWConnection) {
-        let corsHeaders = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\n"
+        let cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\n"
 
-        if firstLine.hasPrefix("OPTIONS") {
-            respond("HTTP/1.1 204 No Content\r\n\(corsHeaders)\r\n", to: conn)
+        let parts  = firstLine.components(separatedBy: " ")
+        let method = parts.count > 0 ? parts[0] : ""
+        let path   = parts.count > 1 ? parts[1] : "/"
+
+        if method == "OPTIONS" {
+            respond("HTTP/1.1 204 No Content\r\n\(cors)\r\n", to: conn)
             return
         }
 
-        if let data = body.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            logPrompt(json)
+        if method == "GET" && path == "/health" {
+            let payload = "{\"status\":\"ok\",\"server\":\"palah\",\"port\":45678}\n"
+            respond("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(payload.utf8.count)\r\n\(cors)\r\n\(payload)", to: conn)
+            return
         }
 
-        respond("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\(corsHeaders)\r\n", to: conn)
+        // POST /prompt — from Chrome extension or BASE_URL relay clients
+        if method == "POST",
+           let data = body.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           (json["type"] as? String) == "PROMPT_CAPTURED" {
+            logCapture(json)
+        }
+
+        respond("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\(cors)\r\n", to: conn)
     }
 
     private func respond(_ response: String, to conn: NWConnection) {
@@ -99,17 +112,35 @@ class PromptServer {
                   completion: .contentProcessed { _ in conn.cancel() })
     }
 
-    // MARK: - Logging
+    // MARK: - Structured logging
 
-    private func logPrompt(_ json: [String: Any]) {
-        let tool   = json["tool"]   as? String ?? "unknown"
-        let url    = json["url"]    as? String ?? ""
-        let text   = json["text"]   as? String ?? ""
+    private func logCapture(_ json: [String: Any]) {
         let source = json["source"] as? String ?? ""
-        let ts = timestamp()
-        log("[\(ts)] [extension:\(source)] \(tool) (\(url))")
-        if !text.isEmpty {
-            log("[\(ts)]   \(text.prefix(300))")
+        let text   = json["text"]   as? String ?? ""
+        let url    = json["url"]    as? String ?? ""
+
+        var entry: [String: Any] = [
+            "ts":      timestamp(),
+            "event":   "submit",
+            "url":     url,
+            "words":   json["words"] as? Int ?? text.split(separator: " ").count,
+            "preview": String(text.prefix(120)),
+        ]
+
+        if source == "node_options" {
+            // From NODE_OPTIONS preload — richer metadata available
+            entry["source"]   = "node_options"
+            entry["app"]      = json["app"]          as? String ?? "unknown"
+            entry["pid"]      = json["pid"]
+            entry["model"]    = json["model"]
+            entry["msgCount"] = json["messageCount"]
+            entry["endpoint"] = json["endpoint"]
+        } else {
+            // From Chrome extension
+            entry["source"] = "extension:\(source)"
+            entry["app"]    = json["tool"] as? String ?? "unknown"
         }
+
+        logJSON(entry)
     }
 }

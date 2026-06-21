@@ -27,6 +27,14 @@ func log(_ message: String) {
     }
 }
 
+// Serialises a dictionary as a single JSON line and appends to the log.
+// All capture events use this so downstream tooling gets consistent structure.
+func logJSON(_ entry: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: entry, options: .sortedKeys),
+          let line = String(data: data, encoding: .utf8) else { return }
+    log(line)
+}
+
 func timestamp() -> String {
     let f = DateFormatter()
     f.dateFormat = "HH:mm:ss"
@@ -353,9 +361,19 @@ class AccessibilityReader {
 
         // Submit detection: input field transitions from real user text to empty or placeholder.
         if !isPlaceholder(lastText) && isPlaceholder(captured) && lastText != lastCaptured {
-            log("[\(timestamp())] [submit] \(appName)")
-            log("[\(timestamp())]   \(lastText.prefix(300))")
-            lastCaptured = lastText
+            let text = lastText
+            let entry: [String: Any] = [
+                "ts":          timestamp(),
+                "event":       "submit",
+                "source":      "ax",
+                "app":         appName,
+                "interceptor": interceptor.name,
+                "role":        lastRole,
+                "words":       text.split(separator: " ").count,
+                "preview":     String(text.prefix(120))
+            ]
+            logJSON(entry)
+            lastCaptured = text
         }
 
         lastText = captured
