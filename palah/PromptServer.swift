@@ -104,12 +104,235 @@ class PromptServer {
             logCapture(json)
         }
 
+        // POST /hooks/cursor — from Cursor hooks (beforeSubmitPrompt, preToolUse, etc.)
+        if method == "POST" && path.hasPrefix("/hooks/cursor") {
+            handleCursorHook(body: body, conn: conn, cors: cors)
+            return
+        }
+
         respond("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\(cors)\r\n", to: conn)
     }
 
     private func respond(_ response: String, to conn: NWConnection) {
         conn.send(content: response.data(using: .utf8),
                   completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    // MARK: - Cursor Hooks
+
+    private func handleCursorHook(body: String, conn: NWConnection, cors: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            respondAllow(cors: cors, to: conn)
+            return
+        }
+
+        // Common base fields present in all Cursor hook payloads (docs: cursor.com/docs/hooks#reference)
+        let eventName     = json["hook_event_name"] as? String ?? detectCursorEvent(json)
+        let sessionId     = json["conversation_id"] as? String
+                         ?? json["session_id"]       as? String ?? ""
+        let cursorVersion = json["cursor_version"]  as? String ?? "unknown"
+        let model         = json["model"]           as? String ?? ""
+        let userEmail     = json["user_email"]      as? String ?? ""
+        let ts            = timestamp()
+
+        // Base fields included in every log entry
+        var base: [String: Any] = [
+            "ts": ts, "source": "cursor_hook", "app": "Cursor",
+            "session_id": sessionId, "cursor_version": cursorVersion,
+        ]
+        if !model.isEmpty     { base["model"]      = model }
+        if !userEmail.isEmpty { base["user_email"] = userEmail }
+
+        switch eventName {
+
+        // ── Prompt ───────────────────────────────────────────────────────────
+
+        case "beforeSubmitPrompt":
+            let prompt = json["prompt"] as? String ?? ""
+            logJSON(base.merging([
+                "event":   "submit",
+                "words":   prompt.split(separator: " ").count,
+                "preview": String(prompt.prefix(120)),
+                "text":    String(prompt.prefix(500)),
+            ]) { $1 })
+
+        // ── Tool calls ───────────────────────────────────────────────────────
+
+        case "preToolUse":
+            var entry = base.merging([
+                "event": "tool_pre",
+                "tool":  json["tool_name"] as? String ?? "",
+                "cwd":   json["cwd"]       as? String ?? "",
+            ]) { $1 }
+            if let input = json["tool_input"] { entry["input"] = input }
+            logJSON(entry)
+            respondAllow(cors: cors, to: conn)
+            return
+
+        case "postToolUse":
+            logJSON(base.merging([
+                "event":       "tool_post",
+                "tool":        json["tool_name"] as? String ?? "",
+                "duration_ms": json["duration"]  as? Int    ?? 0,
+            ]) { $1 })
+
+        case "postToolUseFailure":
+            logJSON(base.merging([
+                "event": "tool_fail",
+                "tool":  json["tool_name"] as? String ?? "",
+                "error": json["error"]     as? String ?? "",
+            ]) { $1 })
+
+        // ── File access ──────────────────────────────────────────────────────
+
+        case "beforeReadFile":
+            // Full file contents before sent to model — primary PII detection point
+            let content = json["content"] as? String ?? ""
+            logJSON(base.merging([
+                "event":           "file_read",
+                "file":            json["file_path"]  as? String ?? "",
+                "content_chars":   content.count,
+                "content_preview": String(content.prefix(120)),
+            ]) { $1 })
+            respondAllow(cors: cors, to: conn)
+            return
+
+        case "afterFileEdit":
+            var entry = base.merging([
+                "event": "file_edit",
+                "file":  json["file_path"] as? String ?? "",
+            ]) { $1 }
+            if let edits = json["edits"] { entry["edits"] = edits }
+            logJSON(entry)
+
+        case "beforeTabFileRead":
+            // Tab completion reading a file — fires separately from agent beforeReadFile
+            let content = json["content"] as? String ?? ""
+            logJSON(base.merging([
+                "event":         "tab_file_read",
+                "file":          json["file_path"] as? String ?? "",
+                "content_chars": content.count,
+            ]) { $1 })
+            respondAllow(cors: cors, to: conn)
+            return
+
+        // ── Shell ────────────────────────────────────────────────────────────
+
+        case "beforeShellExecution":
+            let cmd = json["command"] as? String ?? ""
+            logJSON(base.merging([
+                "event":       "shell_pre",
+                "cmd_preview": String(cmd.prefix(200)),
+                "cwd":         json["cwd"] as? String ?? "",
+            ]) { $1 })
+            respondAllow(cors: cors, to: conn)
+            return
+
+        case "afterShellExecution":
+            let output = json["output"] as? String ?? ""
+            logJSON(base.merging([
+                "event":          "shell_post",
+                "cmd_preview":    String((json["command"] as? String ?? "").prefix(200)),
+                "output_preview": String(output.prefix(120)),
+                "duration_ms":    json["duration"] as? Int  ?? 0,
+                "sandbox":        json["sandbox"]  as? Bool ?? false,
+            ]) { $1 })
+
+        // ── MCP ──────────────────────────────────────────────────────────────
+
+        case "beforeMCPExecution":
+            var entry = base.merging(["event": "mcp_pre"]) { $1 }
+            if let s = json["server_name"] as? String { entry["mcp_server"] = s }
+            if let t = json["tool_name"]   as? String { entry["tool"]       = t }
+            logJSON(entry)
+            respondAllow(cors: cors, to: conn)
+            return
+
+        case "afterMCPExecution":
+            var entry = base.merging(["event": "mcp_post"]) { $1 }
+            if let s = json["server_name"] as? String { entry["mcp_server"] = s }
+            if let t = json["tool_name"]   as? String { entry["tool"]       = t }
+            logJSON(entry)
+
+        // ── Subagents ────────────────────────────────────────────────────────
+
+        case "subagentStart":
+            let task = json["task"] as? String ?? ""
+            logJSON(base.merging([
+                "event":          "subagent_start",
+                "subagent_id":    json["subagent_id"]    as? String ?? "",
+                "subagent_type":  json["subagent_type"]  as? String ?? "",
+                "subagent_model": json["subagent_model"] as? String ?? "",
+                "task_preview":   String(task.prefix(120)),
+                "is_parallel":    json["is_parallel_worker"] as? Bool ?? false,
+            ]) { $1 })
+            respondAllow(cors: cors, to: conn)
+            return
+
+        // ── Response ─────────────────────────────────────────────────────────
+
+        case "afterAgentResponse":
+            let text = json["text"] as? String ?? ""
+            logJSON(base.merging([
+                "event":            "agent_response",
+                "response_words":   text.split(separator: " ").count,
+                "response_preview": String(text.prefix(120)),
+            ]) { $1 })
+
+        // ── Session lifecycle ─────────────────────────────────────────────────
+
+        case "sessionStart":
+            logJSON(base.merging([
+                "event":          "session_start",
+                "session_source": json["source"] as? String ?? "",
+            ]) { $1 })
+
+        case "stop":
+            logJSON(base.merging([
+                "event":      "session_end",
+                "status":     json["status"]     as? String ?? "",
+                "loop_count": json["loop_count"] as? Int    ?? 0,
+            ]) { $1 })
+
+        case "workspaceOpen":
+            logJSON(base.merging(["event": "workspace_open"]) { $1 })
+
+        default:
+            logJSON(base.merging([
+                "event":      "cursor_hook",
+                "hook_event": eventName,
+            ]) { $1 })
+        }
+
+        respond("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\(cors)\r\n{}", to: conn)
+    }
+
+    private func respondAllow(cors: String, to conn: NWConnection) {
+        let payload = "{\"permission\":\"allow\"}\n"
+        respond(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(payload.utf8.count)\r\n\(cors)\r\n\(payload)",
+            to: conn
+        )
+    }
+
+    // Fallback event detection from payload fields for older Cursor versions
+    // that may not include hook_event_name in the payload.
+    private func detectCursorEvent(_ json: [String: Any]) -> String {
+        if json["prompt"]      != nil && json["tool_name"] == nil && json["command"] == nil { return "beforeSubmitPrompt" }
+        if json["subagent_id"] != nil                                                       { return "subagentStart" }
+        if json["tool_name"]   != nil && json["tool_output"] == nil && json["error"] == nil { return "preToolUse" }
+        if json["tool_name"]   != nil && json["tool_output"] != nil                         { return "postToolUse" }
+        if json["tool_name"]   != nil && json["error"]       != nil                         { return "postToolUseFailure" }
+        if json["command"]     != nil && json["output"]      == nil                         { return "beforeShellExecution" }
+        if json["command"]     != nil && json["output"]      != nil                         { return "afterShellExecution" }
+        if json["file_path"]   != nil && json["edits"]       != nil                         { return "afterFileEdit" }
+        if json["file_path"]   != nil && json["attachments"] != nil                         { return "beforeReadFile" }
+        if json["file_path"]   != nil && json["content"]     != nil                         { return "beforeTabFileRead" }
+        if json["text"]        != nil                                                        { return "afterAgentResponse" }
+        if json["loop_count"]  != nil                                                        { return "stop" }
+        if json["source"]      != nil                                                        { return "sessionStart" }
+        return "unknown"
     }
 
     // MARK: - Structured logging

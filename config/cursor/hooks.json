@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt":   [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "preToolUse":           [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "postToolUse":          [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "postToolUseFailure":   [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "beforeReadFile":       [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "afterFileEdit":        [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "beforeTabFileRead":    [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "beforeShellExecution": [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "afterShellExecution":  [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "beforeMCPExecution":   [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "afterMCPExecution":    [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "subagentStart":        [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "afterAgentResponse":   [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "sessionStart":         [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "stop":                 [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }],
+    "workspaceOpen":        [{ "command": "$PALAH_HOOKS_DIR/palah-hook.sh" }]
+  }
+}
