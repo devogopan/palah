@@ -104,9 +104,15 @@ class PromptServer {
             logCapture(json)
         }
 
-        // POST /hooks/cursor — from Cursor hooks (beforeSubmitPrompt, preToolUse, etc.)
+        // POST /hooks/cursor — from Cursor hooks (command type via shell script)
         if method == "POST" && path.hasPrefix("/hooks/cursor") {
             handleCursorHook(body: body, conn: conn, cors: cors)
+            return
+        }
+
+        // POST /hooks/claude — from Claude Code hooks (http type, direct POST)
+        if method == "POST" && path.hasPrefix("/hooks/claude") {
+            handleClaudeCodeHook(body: body, conn: conn, cors: cors)
             return
         }
 
@@ -334,6 +340,140 @@ class PromptServer {
         if json["source"]      != nil                                                        { return "sessionStart" }
         return "unknown"
     }
+
+    // MARK: - Claude Code Hooks
+
+    private func handleClaudeCodeHook(body: String, conn: NWConnection, cors: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            respondClaudeAllow(cors: cors, to: conn); return
+        }
+
+        // Common base fields present in all Claude Code hook payloads
+        let eventName = json["hook_event_name"] as? String ?? ""
+        let sessionId = json["session_id"]      as? String ?? ""
+        let cwd       = json["cwd"]             as? String ?? ""
+        let agentType = json["agent_type"]      as? String ?? ""
+        let ts        = timestamp()
+
+        var base: [String: Any] = [
+            "ts": ts, "source": "claude_hook", "app": "ClaudeCode",
+            "session_id": sessionId, "cwd": cwd,
+        ]
+        if !agentType.isEmpty { base["agent_type"] = agentType }
+
+        switch eventName {
+
+        // ── Prompt ───────────────────────────────────────────────────────────
+
+        case "UserPromptSubmit":
+            let prompt = json["prompt"] as? String ?? ""
+            logJSON(base.merging([
+                "event":   "submit",
+                "words":   prompt.split(separator: " ").count,
+                "preview": String(prompt.prefix(120)),
+                "text":    String(prompt.prefix(500)),
+            ]) { $1 })
+            // BLOCKING (set hooks async:false in settings.json to enable):
+            // let deny = "{\"decision\":\"block\",\"reason\":\"Prompt blocked by Palah policy\"}"
+            // respondClaudeJSON(deny, cors: cors, to: conn); return
+
+        // ── Tool calls ───────────────────────────────────────────────────────
+
+        case "PreToolUse":
+            let toolName = json["tool_name"] as? String ?? ""
+            var entry = base.merging(["event": "tool_pre", "tool": toolName]) { $1 }
+            if let input = json["tool_input"] { entry["input"] = input }
+            logJSON(entry)
+            // BLOCKING (e.g., block dangerous git/shell commands):
+            // if toolName == "Bash",
+            //    let cmd = (json["tool_input"] as? [String: Any])?["command"] as? String {
+            //     let blocked = ["git push --force", "curl | bash", "rm -rf /"]
+            //     if blocked.contains(where: { cmd.contains($0) }) {
+            //         let deny = """
+            //         {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+            //          "permissionDecision":"deny",
+            //          "permissionDecisionReason":"Blocked by Palah: policy violation"}}
+            //         """
+            //         respondClaudeJSON(deny, cors: cors, to: conn); return
+            //     }
+            // }
+
+        case "PostToolUse":
+            let toolName = json["tool_name"] as? String ?? ""
+            var entry = base.merging(["event": "tool_post", "tool": toolName]) { $1 }
+            if let out = json["tool_output"] as? String { entry["output_preview"] = String(out.prefix(120)) }
+            logJSON(entry)
+
+        case "PostToolUseFailure":
+            logJSON(base.merging([
+                "event": "tool_fail",
+                "tool":  json["tool_name"] as? String ?? "",
+                "error": json["error"]     as? String ?? "",
+            ]) { $1 })
+
+        // ── Subagents ────────────────────────────────────────────────────────
+
+        case "SubagentStart":
+            logJSON(base.merging([
+                "event":      "subagent_start",
+                "agent_type": json["agent_type"] as? String ?? "",
+                "agent_id":   json["agent_id"]   as? String ?? "",
+            ]) { $1 })
+            // BLOCKING (deny subagent spawning):
+            // let deny = "{\"decision\":\"block\",\"reason\":\"Subagents not permitted by policy\"}"
+            // respondClaudeJSON(deny, cors: cors, to: conn); return
+
+        case "SubagentStop":
+            logJSON(base.merging([
+                "event":      "subagent_stop",
+                "agent_type": json["agent_type"] as? String ?? "",
+                "agent_id":   json["agent_id"]   as? String ?? "",
+            ]) { $1 })
+
+        // ── Session lifecycle ─────────────────────────────────────────────────
+
+        case "SessionStart":
+            logJSON(base.merging([
+                "event":  "session_start",
+                "source": json["source"] as? String ?? "",
+                "model":  json["model"]  as? String ?? "",
+            ]) { $1 })
+
+        case "SessionEnd", "Stop":
+            logJSON(base.merging(["event": "session_end"]) { $1 })
+
+        // ── Observability ─────────────────────────────────────────────────────
+
+        case "Notification":
+            let msg = json["message"] as? String ?? ""
+            logJSON(base.merging(["event": "notification", "message": String(msg.prefix(200))]) { $1 })
+
+        case "FileChanged":
+            logJSON(base.merging(["event": "file_changed", "file": json["file_path"] as? String ?? ""]) { $1 })
+
+        case "PreCompact":
+            logJSON(base.merging(["event": "pre_compact"]) { $1 })
+            // BLOCKING (prevent context compaction):
+            // let deny = "{\"decision\":\"block\",\"reason\":\"Compaction blocked by Palah\"}"
+            // respondClaudeJSON(deny, cors: cors, to: conn); return
+
+        default:
+            logJSON(base.merging(["event": "claude_hook", "hook_event": eventName]) { $1 })
+        }
+
+        respondClaudeAllow(cors: cors, to: conn)
+    }
+
+    // Empty {} = proceed in Claude Code HTTP hooks
+    private func respondClaudeAllow(cors: String, to conn: NWConnection) {
+        respond("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\(cors)\r\n{}", to: conn)
+    }
+
+    // Used for block responses — uncomment respondClaudeJSON calls above to enable
+    // private func respondClaudeJSON(_ payload: String, cors: String, to conn: NWConnection) {
+    //     respond("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(payload.utf8.count)\r\n\(cors)\r\n\(payload)", to: conn)
+    // }
 
     // MARK: - Structured logging
 

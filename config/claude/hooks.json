@@ -1,0 +1,18 @@
+{
+  "_comment": "Palah hooks for Claude Code. Merged into ~/.claude/settings.json by install-claude-hooks.sh.",
+  "_blocking_note": "Uses command type (shell script) so Claude Code is never blocked if Palah is down. For blocking: set script to sync mode and handle Palah's JSON response.",
+  "hooks": {
+    "UserPromptSubmit": [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "PreToolUse":        [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "PostToolUse":       [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "PostToolUseFailure":[{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "SubagentStart":     [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "SubagentStop":      [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "Stop":              [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "SessionStart":      [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "SessionEnd":        [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "Notification":      [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "FileChanged":       [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }],
+    "PreCompact":        [{ "matcher": "", "hooks": [{ "type": "command", "command": "$PALAH_CLAUDE_HOOKS_DIR/palah-hook.sh" }] }]
+  }
+}

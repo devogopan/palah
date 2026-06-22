@@ -218,6 +218,8 @@ private let vscodeFamilyBundleIDs: Set<String> = [
     "com.todesktop.230313mzl4w4u92",    // Cursor
     "com.exafunction.windsurf",          // Windsurf
     "dev.zed.zed",                       // Zed
+    "com.anthropic.claudefordesktop",   // Claude Desktop (Electron)
+    "com.openai.chat",                   // ChatGPT Desktop (Electron)
 ]
 
 struct VSCodeFamilyInterceptor: PromptInterceptor {
@@ -240,9 +242,7 @@ struct VSCodeFamilyInterceptor: PromptInterceptor {
 // Add new native AI apps here by extending the bundle ID list.
 
 private let nativeAIAppBundleIDs: Set<String> = [
-    "com.anthropic.claudefordesktop",   // Claude Desktop
-    "com.openai.chat",                   // ChatGPT Desktop
-    "notion.id",                         // Notion
+    "notion.id",                         // Notion (native, no AXManualAccessibility needed)
 ]
 
 struct NativeAIAppInterceptor: PromptInterceptor {
@@ -314,6 +314,8 @@ class AccessibilityReader {
     private var lastCaptured = ""   // last text we actually logged (dedup)
     private var lastAppName = ""
     private var lastRole = ""
+    private var lastInputRole = ""  // role when user was last actively typing
+    private var wasInInput = false  // was previous tick focused on a text input role?
     private var timer: Timer?
 
     func start() {
@@ -344,7 +346,9 @@ class AccessibilityReader {
             log("[\(timestamp())] → \(appName)  [\(interceptor.name)]")
             lastAppName = appName
             lastRole = ""
+            lastInputRole = ""
             lastText = ""
+            wasInInput = false
         }
 
         if !role.isEmpty, role != lastRole {
@@ -353,30 +357,42 @@ class AccessibilityReader {
         }
 
         let captured = text ?? ""
+        let inInput  = textInputRoles.contains(role)
 
-        // Only track text when focus is on an actual input element.
-        // When focus moves to the response area (AXGroup, AXScrollArea, etc.) after submit,
-        // freeze lastText so the user's prompt is preserved until the input field clears.
-        guard textInputRoles.contains(role) else { return }
+        // Require at least 3 chars to avoid false submits from backspace (e.g. "l", "lo").
+        let hadContent = !isPlaceholder(lastText)
+                      && lastText != lastCaptured
+                      && lastText.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3
 
-        // Submit detection: input field transitions from real user text to empty or placeholder.
-        if !isPlaceholder(lastText) && isPlaceholder(captured) && lastText != lastCaptured {
-            let text = lastText
-            let entry: [String: Any] = [
-                "ts":          timestamp(),
-                "event":       "submit",
-                "source":      "ax",
-                "app":         appName,
-                "interceptor": interceptor.name,
-                "role":        lastRole,
-                "words":       text.split(separator: " ").count,
-                "preview":     String(text.prefix(120))
-            ]
-            logJSON(entry)
-            lastCaptured = text
+        // Submit detection — two patterns:
+        // A) Field clears while still focused (VS Code chat, ChatGPT web)
+        // B) Focus leaves the input entirely (Claude Desktop: AXTextArea → AXButton → AXWebArea)
+        if hadContent {
+            let fieldCleared = inInput  && isPlaceholder(captured)
+            let leftInput    = !inInput && wasInInput
+            if fieldCleared || leftInput {
+                let text = lastText
+                logJSON([
+                    "ts":          timestamp(),
+                    "event":       "submit",
+                    "source":      "ax",
+                    "app":         appName,
+                    "interceptor": interceptor.name,
+                    "role":        lastInputRole,   // role while typing, not the exit role
+                    "words":       text.split(separator: " ").count,
+                    "preview":     String(text.prefix(120)),
+                ])
+                lastCaptured = text
+            }
         }
 
-        lastText = captured
+        // Only update lastText when focused on an input — freeze it while in response area
+        // so the prompt survives until we can detect the submit.
+        if inInput {
+            lastText = captured
+            lastInputRole = role
+        }
+        wasInInput = inInput
     }
 
 }
