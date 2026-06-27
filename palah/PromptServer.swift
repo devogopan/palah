@@ -155,12 +155,22 @@ class PromptServer {
         // ── Prompt ───────────────────────────────────────────────────────────
 
         case "beforeSubmitPrompt":
+            sessions.openSession(sessionId: sessionId, meta: [
+                "app": "Cursor", "cursor_version": cursorVersion,
+                "model": model, "user_email": userEmail,
+            ])
+            sessions.advanceTurn(sessionId: sessionId)
             let prompt = json["prompt"] as? String ?? ""
+            let submitEntry = base.merging([
+                "event": "submit",
+                "words": prompt.split(separator: " ").count,
+                "text":  prompt,
+            ]) { $1 }
+            logPayload(submitEntry)
             logJSON(base.merging([
                 "event":   "submit",
                 "words":   prompt.split(separator: " ").count,
                 "preview": String(prompt.prefix(120)),
-                "text":    String(prompt.prefix(500)),
             ]) { $1 })
 
         // ── Tool calls ───────────────────────────────────────────────────────
@@ -369,6 +379,7 @@ class PromptServer {
             ]) { $1 })
 
         case "stop":
+            sessions.closeSession(sessionId: sessionId)
             logJSON(base.merging([
                 "event":      "session_end",
                 "status":     json["status"]     as? String ?? "",
@@ -441,12 +452,22 @@ class PromptServer {
         // ── Prompt ───────────────────────────────────────────────────────────
 
         case "UserPromptSubmit":
+            sessions.openSession(sessionId: sessionId, meta: [
+                "app": "ClaudeCode", "cwd": cwd,
+                "model": json["model"] as? String ?? "",
+            ])
+            sessions.advanceTurn(sessionId: sessionId)
             let prompt = json["prompt"] as? String ?? ""
+            let submitEntry = base.merging([
+                "event": "submit",
+                "words": prompt.split(separator: " ").count,
+                "text":  prompt,
+            ]) { $1 }
+            logPayload(submitEntry)
             logJSON(base.merging([
                 "event":   "submit",
                 "words":   prompt.split(separator: " ").count,
                 "preview": String(prompt.prefix(120)),
-                "text":    String(prompt.prefix(500)),
             ]) { $1 })
             // BLOCKING (set hooks async:false in settings.json to enable):
             // let deny = "{\"decision\":\"block\",\"reason\":\"Prompt blocked by Palah policy\"}"
@@ -545,6 +566,7 @@ class PromptServer {
             ]) { $1 })
 
         case "SessionEnd", "Stop":
+            sessions.closeSession(sessionId: sessionId)
             logJSON(base.merging(["event": "session_end"]) { $1 })
 
         // ── Observability ─────────────────────────────────────────────────────

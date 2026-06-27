@@ -13,8 +13,7 @@ import ApplicationServices
 
 // MARK: - Logging
 
-let logPath         = "/tmp/palah.log"
-let payloadLogPath  = "/tmp/palah-payloads.ndjson"
+let logPath = "/tmp/palah.log"
 
 func log(_ message: String) {
     print(message)
@@ -36,23 +35,37 @@ func logJSON(_ entry: [String: Any]) {
     log(line)
 }
 
-// Writes a full-content payload to palah-payloads.ndjson for the classifier LLM.
-// Returns a payload_id (UUID) that is embedded in the compact palah.log entry
-// so the two files can be correlated. Caller appends payload_id to their logJSON entry.
+// Writes a full-content payload to the current session's turn file for the classifier LLM.
+// Routes to /tmp/palah-sessions/<session_id>/turn-NNN.ndjson using the session_id already
+// present in the entry. Returns a payload_id UUID embedded in the compact palah.log entry.
 @discardableResult
 func logPayload(_ entry: [String: Any]) -> String {
-    let id = UUID().uuidString
-    var full = entry
+    let id        = UUID().uuidString
+    var full      = entry
     full["payload_id"] = id
+
+    let sessionId = entry["session_id"] as? String ?? ""
+    let path: String
+    if !sessionId.isEmpty {
+        path = sessions.payloadPath(sessionId: sessionId)
+    } else {
+        // Rare fallback for events without a session_id (AX-only captures)
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
+        let dir = sessionBaseDir
+        if !FileManager.default.fileExists(atPath: dir) {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        }
+        path = "\(dir)/ax-\(fmt.string(from: Date())).ndjson"
+    }
+
     guard let data = try? JSONSerialization.data(withJSONObject: full, options: .sortedKeys),
           let line = String(data: data, encoding: .utf8) else { return id }
-    let lineWithNewline = line + "\n"
-    guard let bytes = lineWithNewline.data(using: .utf8) else { return id }
-    if FileManager.default.fileExists(atPath: payloadLogPath),
-       let fh = FileHandle(forWritingAtPath: payloadLogPath) {
+    let bytes = (line + "\n").data(using: .utf8)!
+    if FileManager.default.fileExists(atPath: path),
+       let fh = FileHandle(forWritingAtPath: path) {
         fh.seekToEndOfFile(); fh.write(bytes); fh.closeFile()
     } else {
-        try? bytes.write(to: URL(fileURLWithPath: payloadLogPath))
+        try? bytes.write(to: URL(fileURLWithPath: path))
     }
     return id
 }
