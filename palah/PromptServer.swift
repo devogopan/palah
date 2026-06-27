@@ -171,17 +171,49 @@ class PromptServer {
                 "tool":  json["tool_name"] as? String ?? "",
                 "cwd":   json["cwd"]       as? String ?? "",
             ]) { $1 }
-            if let input = json["tool_input"] { entry["input"] = input }
+            if let input = json["tool_input"] {
+                let inputStr: String
+                if let s = input as? String {
+                    inputStr = s
+                } else if let d = try? JSONSerialization.data(withJSONObject: input),
+                          let s = String(data: d, encoding: .utf8) { inputStr = s } else { inputStr = "" }
+                if inputStr.count > 300 {
+                    var payloadEntry = entry
+                    payloadEntry["tool_input"] = input
+                    entry["input_preview"] = String(inputStr.prefix(120))
+                    entry["input_chars"]   = inputStr.count
+                    entry["payload_id"]    = logPayload(payloadEntry)
+                } else {
+                    entry["input"] = input
+                }
+            }
             logJSON(entry)
             respondAllow(cors: cors, to: conn)
             return
 
         case "postToolUse":
-            logJSON(base.merging([
+            var entry = base.merging([
                 "event":       "tool_post",
                 "tool":        json["tool_name"] as? String ?? "",
                 "duration_ms": json["duration"]  as? Int    ?? 0,
-            ]) { $1 })
+            ]) { $1 }
+            if let out = json["tool_output"] {
+                var payloadEntry = entry
+                payloadEntry["tool_output"] = out
+                let pid = logPayload(payloadEntry)
+                let preview: String
+                if let s = out as? String {
+                    preview = String(s.prefix(120))
+                } else if let d = try? JSONSerialization.data(withJSONObject: out),
+                          let s = String(data: d, encoding: .utf8) {
+                    preview = String(s.prefix(120))
+                } else {
+                    preview = String("\(out)".prefix(120))
+                }
+                entry["output_preview"] = preview
+                entry["payload_id"] = pid
+            }
+            logJSON(entry)
 
         case "postToolUseFailure":
             logJSON(base.merging([
@@ -193,33 +225,47 @@ class PromptServer {
         // ── File access ──────────────────────────────────────────────────────
 
         case "beforeReadFile":
-            // Full file contents before sent to model — primary PII detection point
             let content = json["content"] as? String ?? ""
-            logJSON(base.merging([
+            var entry = base.merging([
                 "event":           "file_read",
-                "file":            json["file_path"]  as? String ?? "",
+                "file":            json["file_path"] as? String ?? "",
                 "content_chars":   content.count,
                 "content_preview": String(content.prefix(120)),
-            ]) { $1 })
+            ]) { $1 }
+            var payloadEntry = entry
+            payloadEntry["content"] = content
+            entry["payload_id"] = logPayload(payloadEntry)
+            logJSON(entry)
             respondAllow(cors: cors, to: conn)
             return
 
         case "afterFileEdit":
+            let editsStr: String
+            if let e = json["edits"],
+               let d = try? JSONSerialization.data(withJSONObject: e),
+               let s = String(data: d, encoding: .utf8) { editsStr = s } else { editsStr = "" }
             var entry = base.merging([
-                "event": "file_edit",
-                "file":  json["file_path"] as? String ?? "",
+                "event":         "file_edit",
+                "file":          json["file_path"] as? String ?? "",
+                "edits_chars":   editsStr.count,
+                "edits_preview": String(editsStr.prefix(120)),
             ]) { $1 }
-            if let edits = json["edits"] { entry["edits"] = edits }
+            var payloadEntry = entry
+            if let e = json["edits"] { payloadEntry["edits"] = e }
+            entry["payload_id"] = logPayload(payloadEntry)
             logJSON(entry)
 
         case "beforeTabFileRead":
-            // Tab completion reading a file — fires separately from agent beforeReadFile
             let content = json["content"] as? String ?? ""
-            logJSON(base.merging([
+            var entry = base.merging([
                 "event":         "tab_file_read",
                 "file":          json["file_path"] as? String ?? "",
                 "content_chars": content.count,
-            ]) { $1 })
+            ]) { $1 }
+            var payloadEntry = entry
+            payloadEntry["content"] = content
+            entry["payload_id"] = logPayload(payloadEntry)
+            logJSON(entry)
             respondAllow(cors: cors, to: conn)
             return
 
@@ -237,13 +283,17 @@ class PromptServer {
 
         case "afterShellExecution":
             let output = json["output"] as? String ?? ""
-            logJSON(base.merging([
+            var entry = base.merging([
                 "event":          "shell_post",
                 "cmd_preview":    String((json["command"] as? String ?? "").prefix(200)),
                 "output_preview": String(output.prefix(120)),
                 "duration_ms":    json["duration"] as? Int  ?? 0,
                 "sandbox":        json["sandbox"]  as? Bool ?? false,
-            ]) { $1 })
+            ]) { $1 }
+            var payloadEntry = entry
+            payloadEntry["output"] = output
+            entry["payload_id"] = logPayload(payloadEntry)
+            logJSON(entry)
 
         // ── MCP ──────────────────────────────────────────────────────────────
 
@@ -251,6 +301,20 @@ class PromptServer {
             var entry = base.merging(["event": "mcp_pre"]) { $1 }
             if let s = json["server_name"] as? String { entry["mcp_server"] = s }
             if let t = json["tool_name"]   as? String { entry["tool"]       = t }
+            if let input = json["tool_input"] {
+                let inputStr: String
+                if let s = input as? String { inputStr = s }
+                else if let d = try? JSONSerialization.data(withJSONObject: input),
+                        let s = String(data: d, encoding: .utf8) { inputStr = s } else { inputStr = "" }
+                if inputStr.count > 300 {
+                    var payloadEntry = entry; payloadEntry["tool_input"] = input
+                    entry["input_preview"] = String(inputStr.prefix(120))
+                    entry["input_chars"]   = inputStr.count
+                    entry["payload_id"]    = logPayload(payloadEntry)
+                } else {
+                    entry["input"] = input
+                }
+            }
             logJSON(entry)
             respondAllow(cors: cors, to: conn)
             return
@@ -259,6 +323,16 @@ class PromptServer {
             var entry = base.merging(["event": "mcp_post"]) { $1 }
             if let s = json["server_name"] as? String { entry["mcp_server"] = s }
             if let t = json["tool_name"]   as? String { entry["tool"]       = t }
+            if let out = json["tool_output"] {
+                var payloadEntry = entry; payloadEntry["tool_output"] = out
+                let preview: String
+                if let s = out as? String { preview = String(s.prefix(120)) }
+                else if let d = try? JSONSerialization.data(withJSONObject: out),
+                        let s = String(data: d, encoding: .utf8) { preview = String(s.prefix(120)) }
+                else { preview = String("\(out)".prefix(120)) }
+                entry["output_preview"] = preview
+                entry["payload_id"]     = logPayload(payloadEntry)
+            }
             logJSON(entry)
 
         // ── Subagents ────────────────────────────────────────────────────────
@@ -383,7 +457,22 @@ class PromptServer {
         case "PreToolUse":
             let toolName = json["tool_name"] as? String ?? ""
             var entry = base.merging(["event": "tool_pre", "tool": toolName]) { $1 }
-            if let input = json["tool_input"] { entry["input"] = input }
+            if let input = json["tool_input"] {
+                let inputStr: String
+                if let s = input as? String {
+                    inputStr = s
+                } else if let d = try? JSONSerialization.data(withJSONObject: input),
+                          let s = String(data: d, encoding: .utf8) { inputStr = s } else { inputStr = "" }
+                if inputStr.count > 300 {
+                    var payloadEntry = entry
+                    payloadEntry["tool_input"] = input
+                    entry["input_preview"] = String(inputStr.prefix(120))
+                    entry["input_chars"]   = inputStr.count
+                    entry["payload_id"]    = logPayload(payloadEntry)
+                } else {
+                    entry["input"] = input
+                }
+            }
             logJSON(entry)
             // BLOCKING (e.g., block dangerous git/shell commands):
             // if toolName == "Bash",
@@ -402,7 +491,22 @@ class PromptServer {
         case "PostToolUse":
             let toolName = json["tool_name"] as? String ?? ""
             var entry = base.merging(["event": "tool_post", "tool": toolName]) { $1 }
-            if let out = json["tool_output"] as? String { entry["output_preview"] = String(out.prefix(120)) }
+            if let out = json["tool_response"] {
+                var payloadEntry = entry
+                payloadEntry["tool_response"] = out
+                let pid = logPayload(payloadEntry)
+                let preview: String
+                if let s = out as? String {
+                    preview = String(s.prefix(120))
+                } else if let data = try? JSONSerialization.data(withJSONObject: out),
+                          let s = String(data: data, encoding: .utf8) {
+                    preview = String(s.prefix(120))
+                } else {
+                    preview = String("\(out)".prefix(120))
+                }
+                entry["output_preview"] = preview
+                entry["payload_id"] = pid
+            }
             logJSON(entry)
 
         case "PostToolUseFailure":

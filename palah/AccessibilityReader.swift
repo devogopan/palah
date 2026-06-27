@@ -13,7 +13,8 @@ import ApplicationServices
 
 // MARK: - Logging
 
-let logPath = "/tmp/palah.log"
+let logPath         = "/tmp/palah.log"
+let payloadLogPath  = "/tmp/palah-payloads.ndjson"
 
 func log(_ message: String) {
     print(message)
@@ -33,6 +34,27 @@ func logJSON(_ entry: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: entry, options: .sortedKeys),
           let line = String(data: data, encoding: .utf8) else { return }
     log(line)
+}
+
+// Writes a full-content payload to palah-payloads.ndjson for the classifier LLM.
+// Returns a payload_id (UUID) that is embedded in the compact palah.log entry
+// so the two files can be correlated. Caller appends payload_id to their logJSON entry.
+@discardableResult
+func logPayload(_ entry: [String: Any]) -> String {
+    let id = UUID().uuidString
+    var full = entry
+    full["payload_id"] = id
+    guard let data = try? JSONSerialization.data(withJSONObject: full, options: .sortedKeys),
+          let line = String(data: data, encoding: .utf8) else { return id }
+    let lineWithNewline = line + "\n"
+    guard let bytes = lineWithNewline.data(using: .utf8) else { return id }
+    if FileManager.default.fileExists(atPath: payloadLogPath),
+       let fh = FileHandle(forWritingAtPath: payloadLogPath) {
+        fh.seekToEndOfFile(); fh.write(bytes); fh.closeFile()
+    } else {
+        try? bytes.write(to: URL(fileURLWithPath: payloadLogPath))
+    }
+    return id
 }
 
 func timestamp() -> String {
