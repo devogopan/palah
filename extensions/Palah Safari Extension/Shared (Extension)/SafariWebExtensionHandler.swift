@@ -5,10 +5,21 @@
 //  Receives native messages from background.js (browser.runtime.sendNativeMessage)
 //  and forwards them to the Palah macOS agent at localhost:45678 via URLSession.
 //
-//  Native Swift URLSession is NOT subject to web-page mixed-content blocking
-//  (that only applies to JS fetch from an HTTPS page). Requires:
-//    - com.apple.security.network.client entitlement
-//    - NSAppTransportSecurity localhost exception (Info.plist)
+//  WHY URLSession (not JS fetch):
+//  content.js runs in an HTTPS page (chatgpt.com, claude.ai, etc.). Safari enforces
+//  mixed-content policy and blocks HTTP fetch from HTTPS pages — even to localhost.
+//  Native Swift URLSession is NOT subject to this restriction, so the relay goes:
+//    content.js → sendMessage → background.js → sendNativeMessage → here → URLSession
+//
+//  WHAT MUST BE IN PLACE (all three, or the chain silently breaks):
+//    1. "nativeMessaging" in the Safari manifest permissions   ← was missing originally
+//    2. com.apple.security.network.client entitlement
+//    3. NSAppTransportSecurity localhost exception (Info.plist)
+//
+//  HOW TO RESUME (after code-signing with Apple Developer identity):
+//    log stream --predicate 'subsystem == "com.devogopan.palah.safari"' --info
+//    "PALAH: beginRequest invoked"  → sendNativeMessage reached this handler
+//    "PALAH: POST ok, status 200"   → full relay working; check /tmp/palah-sessions
 
 import SafariServices
 import os.log

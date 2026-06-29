@@ -126,32 +126,25 @@ D=$(ls -dt /tmp/palah-sessions/$(date +%Y-%m-%d)/*/*/ | head -1); echo "$D"; cat
 
 ---
 
-## Test 1 — AX Capture: Claude Desktop
+## Test 1 — AX Capture: Claude Desktop ⚠️ BROKEN (app-side regression)
 
 **App:** Claude for Mac (`/Applications/Claude.app`)
 
-| Step | Action |
-|---|---|
-| 1 | Open Claude Desktop, click the chat input |
-| 2 | Type: `what is the capital of France ?` |
-| 3 | Click Send (or press Enter) |
+> **Status (2026-06-29):** No longer capturable via AX. Current Claude Desktop
+> builds (Electron 42 / Chromium) expose **no focused UI element** to the
+> Accessibility API — `kAXFocusedUIElementAttribute` returns nil on every tick,
+> so no `field:` role is ever seen and no text can be read. Same class of gap as
+> VS Code Copilot Chat (Chromium `EditContext`). Not fixable from Palah via AX.
+> Capture would require hooks (Claude Desktop has none) or network interception
+> (enterprise-gateway model, out of scope).
 
-**Expected log entry:**
-```json
-{
-  "event": "submit",
-  "source": "ax",
-  "app": "Claude",
-  "interceptor": "VSCode Family",
-  "words": 7,
-  "preview": "what is the capital of France ?"
-}
+**Diagnostic (to re-check after a Claude Desktop update):**
+```bash
+tail -f /tmp/palah.log | grep -i "claude\|field:"
+# Focus Claude Desktop and type. If a `field: AXTextArea` line appears, AX is
+# working again and this test can be restored. If only `→ Claude [VSCode Family]`
+# appears with no field line, the gap persists.
 ```
-
-**Also verify:** type a few chars and delete them with backspace — nothing should log.
-
-**Pass criteria:** entry appears within 1s of clicking Send
-**Fail signal:** nothing logged, or `interceptor` is not `VSCode Family`
 
 ---
 
@@ -364,7 +357,7 @@ log stream --predicate 'subsystem == "com.devogopan.palah.safari"' --info
 
 | # | Method | App | Status | Notes |
 |---|---|---|---|---|
-| 1 | AX | Claude Desktop | ☐ Pass / ☐ Fail | |
+| 1 | AX | Claude Desktop | ⚠️ Broken | App-side regression — no AX focused element (see Test 1) |
 | 2 | AX | VS Code | ☐ Pass / ☐ Fail | |
 | 3 | AX | Safari | ☐ Pass / ☐ Fail | |
 | 4 | Extension | Chrome (claude.ai) | ☐ Pass / ☐ Fail | |
@@ -382,6 +375,7 @@ log stream --predicate 'subsystem == "com.devogopan.palah.safari"' --info
 
 | Gap | Reason | Workaround |
 |---|---|---|
+| Claude Desktop (native) | Current Electron/Chromium build exposes no focused AX element (EditContext) | Use Claude Code hooks / claude.ai in browser (extension); native Desktop not capturable |
 | GitHub Copilot | No hooks API, no cert-free intercept | Enterprise gateway model only |
 | Cursor built-in subscription AI (non-Sonnet) | Same process, no hook for non-API path | AX capture gets the prompt text |
 | Short prompts < 3 chars via AX | Filtered to prevent backspace false positives | Hooks capture these correctly |

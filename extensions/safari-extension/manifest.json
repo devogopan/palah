@@ -5,6 +5,7 @@
   "description": "Endpoint-native AI governance — intercepts prompts before they leave your device.",
 
   "permissions": ["storage", "activeTab", "nativeMessaging"],
+  "_nativeMessaging_note": "This permission is REQUIRED and was the root cause of the original failure. The shared Chrome manifest was missing it, causing browser.runtime.sendNativeMessage() to silently reject without ever reaching SafariWebExtensionHandler.swift. Do not merge this back into the Chrome manifest.",
 
   "host_permissions": [
     "https://chatgpt.com/*",

@@ -1,9 +1,14 @@
 // content.js — Palah prompt interceptor (Safari)
-// Identical to chrome content.js, but the Palah relay goes through the
-// native bridge: content.js → sendMessage → background.js → sendNativeMessage
-// → SafariWebExtensionHandler → URLSession POST localhost:45678.
-// (Direct fetch to http://localhost is blocked from an HTTPS page by
-// mixed-content policy, so it cannot be done in the content script.)
+//
+// Relay chain: content.js → sendMessage → background.js → sendNativeMessage
+//              → SafariWebExtensionHandler.swift → URLSession POST :45678
+//
+// Why not fetch() here directly:
+// This script runs inside an HTTPS page (chatgpt.com, claude.ai, ...).
+// Safari's mixed-content policy blocks HTTP fetch from an HTTPS context —
+// even to localhost. That is a browser-level rule, not a permissions problem.
+// The native bridge (sendNativeMessage → Swift URLSession) is the only path
+// that bypasses it, because native code is not subject to web-page CSP/CORS.
 
 'use strict';
 
@@ -173,7 +178,7 @@ function capturePrompt(source) {
   if (cfg.response) {
     const countBefore = document.querySelectorAll(cfg.response).length;
     pendingCapture = { cfg, countBefore };
-    scheduleResponseObserver();
+    scheduleResponseCapture();
   }
 
   const payload = {
@@ -195,52 +200,53 @@ function capturePrompt(source) {
 }
 
 // ─── Response capture ─────────────────────────────────────────────────────────
+// Capture by CONTENT STABILITY, not a site-specific "is generating" selector.
+// Those break when sites change markup, causing partial captures. We poll the
+// latest response element and capture once its text stops growing for
+// STREAM_SETTLE_MS. (Mirrors chrome-extension/content.js — keep in sync.)
 
-let responseObserver = null;
-let responseTimer    = null;
-const STREAM_SETTLE_MS = 1200;
+let responsePoll       = null;
+const STREAM_SETTLE_MS = 1500;     // text must be unchanged this long to count as complete
+const RESPONSE_POLL_MS = 400;      // how often to sample the response element
+const RESPONSE_MAX_MS  = 300_000;  // give up after 5 minutes
 
-function scheduleResponseObserver() {
-  if (responseObserver) responseObserver.disconnect();
-  setTimeout(startResponseObserver, 200);
+function scheduleResponseCapture() {
+  if (responsePoll) { clearInterval(responsePoll); responsePoll = null; }
+  setTimeout(startResponsePolling, 300);
 }
 
-function startResponseObserver() {
+function startResponsePolling() {
   if (!pendingCapture?.cfg.response) return;
-  const cfg  = pendingCapture.cfg;
-  const root = document.querySelector(cfg.responseRoot) ?? document.body;
+  const cfg        = pendingCapture.cfg;
+  const startedAt  = Date.now();
+  let   lastLen    = 0;
+  let   lastGrowth = Date.now();
 
-  responseObserver = new MutationObserver(() => {
-    clearTimeout(responseTimer);
-    if (cfg.streamDone()) {
-      responseTimer = setTimeout(tryCapture, STREAM_SETTLE_MS);
-    } else {
-      responseTimer = setTimeout(() => { if (cfg.streamDone()) tryCapture(); }, STREAM_SETTLE_MS);
+  responsePoll = setInterval(() => {
+    if (!pendingCapture) { clearInterval(responsePoll); responsePoll = null; return; }
+
+    const fresh = [...document.querySelectorAll(cfg.response)].slice(pendingCapture.countBefore);
+    const el    = fresh[fresh.length - 1];
+    const text  = el?.innerText?.trim() ?? '';
+
+    if (text.length > lastLen) {        // still growing → reset the settle clock
+      lastLen    = text.length;
+      lastGrowth = Date.now();
     }
-  });
 
-  responseObserver.observe(root, { childList: true, subtree: true, characterData: true });
-  setTimeout(() => {
-    if (responseObserver) { responseObserver.disconnect(); responseObserver = null; }
-  }, 300_000);
+    const stable       = text.length >= 10 && (Date.now() - lastGrowth) >= STREAM_SETTLE_MS;
+    const streamDoneOk = !cfg.streamDone || cfg.streamDone();
+    const timedOut     = Date.now() - startedAt > RESPONSE_MAX_MS;
+
+    if ((stable && streamDoneOk) || timedOut) {
+      clearInterval(responsePoll); responsePoll = null;
+      if (text.length >= 10) finalizeResponse(text);
+      pendingCapture = null;
+    }
+  }, RESPONSE_POLL_MS);
 }
 
-function tryCapture() {
-  if (!pendingCapture) return;
-  const { cfg, countBefore } = pendingCapture;
-
-  const allResponses = [...document.querySelectorAll(cfg.response)];
-  const newResponses = allResponses.slice(countBefore);
-  if (!newResponses.length) return;
-
-  const responseEl = newResponses[newResponses.length - 1];
-  const text = responseEl?.innerText?.trim() ?? '';
-  if (text.length < 10) return;
-
-  if (responseObserver) { responseObserver.disconnect(); responseObserver = null; }
-  clearTimeout(responseTimer);
-  pendingCapture = null;
-
+function finalizeResponse(text) {
   const payload = {
     type:          'PROMPT_CAPTURED',
     event_type:    'ai_response',

@@ -208,11 +208,11 @@ function capturePrompt(source) {
   // Reset token accumulator for this new turn
   pendingTokens = { input_tokens: null, output_tokens: null };
 
-  // Snapshot response count now (before streaming starts) and queue observer
+  // Snapshot response count now (before streaming starts) and queue capture
   if (cfg.response) {
     const countBefore = document.querySelectorAll(cfg.response).length;
     pendingCapture = { cfg, countBefore };
-    scheduleResponseObserver();
+    scheduleResponseCapture();
   }
 
   chrome.runtime.sendMessage({
@@ -229,60 +229,58 @@ function capturePrompt(source) {
 }
 
 // ─── Response capture ─────────────────────────────────────────────────────────
+// Capture by CONTENT STABILITY, not by a site-specific "is generating" selector.
+// Those selectors break when sites change markup, which made streamDone() report
+// "done" immediately and capture a partial response. Instead we poll the latest
+// response element and only capture once its text has stopped growing for
+// STREAM_SETTLE_MS — robust across sites and immune to streaming-indicator changes.
 
-let responseObserver = null;
-let responseTimer    = null;
-const STREAM_SETTLE_MS = 1200;   // wait this long after last DOM change before reading response
+let responsePoll       = null;
+const STREAM_SETTLE_MS = 1500;     // text must be unchanged this long to count as complete
+const RESPONSE_POLL_MS = 400;      // how often to sample the response element
+const RESPONSE_MAX_MS  = 300_000;  // give up after 5 minutes
 
-function scheduleResponseObserver() {
-  if (responseObserver) responseObserver.disconnect();
+function scheduleResponseCapture() {
+  if (responsePoll) { clearInterval(responsePoll); responsePoll = null; }
   // Small delay so the submit completes and response elements start appearing
-  setTimeout(startResponseObserver, 200);
+  setTimeout(startResponsePolling, 300);
 }
 
-function startResponseObserver() {
+function startResponsePolling() {
   if (!pendingCapture?.cfg.response) return;
-  const cfg = pendingCapture.cfg;
-  const root = document.querySelector(cfg.responseRoot) ?? document.body;
+  const cfg       = pendingCapture.cfg;
+  const startedAt = Date.now();
+  let   lastLen   = 0;
+  let   lastGrowth = Date.now();
 
-  responseObserver = new MutationObserver(() => {
-    clearTimeout(responseTimer);
-    // Only try to capture once streaming is done (site-specific signal)
-    if (cfg.streamDone()) {
-      responseTimer = setTimeout(tryCapture, STREAM_SETTLE_MS);
-    } else {
-      // Still streaming — keep waiting; reset settle timer
-      responseTimer = setTimeout(() => {
-        if (cfg.streamDone()) tryCapture();
-      }, STREAM_SETTLE_MS);
+  responsePoll = setInterval(() => {
+    if (!pendingCapture) { clearInterval(responsePoll); responsePoll = null; return; }
+
+    const fresh = [...document.querySelectorAll(cfg.response)].slice(pendingCapture.countBefore);
+    const el    = fresh[fresh.length - 1];
+    const text  = el?.innerText?.trim() ?? '';
+
+    if (text.length > lastLen) {        // still growing → reset the settle clock
+      lastLen    = text.length;
+      lastGrowth = Date.now();
     }
-  });
 
-  responseObserver.observe(root, { childList: true, subtree: true, characterData: true });
+    // Done when the text has been stable long enough. streamDone() is only an
+    // optional extra guard — if its selector is stale (always true) we fall back
+    // entirely to the stability signal.
+    const stable      = text.length >= 10 && (Date.now() - lastGrowth) >= STREAM_SETTLE_MS;
+    const streamDoneOk = !cfg.streamDone || cfg.streamDone();
+    const timedOut    = Date.now() - startedAt > RESPONSE_MAX_MS;
 
-  // Safety timeout: give up after 5 minutes
-  setTimeout(() => {
-    if (responseObserver) { responseObserver.disconnect(); responseObserver = null; }
-  }, 300_000);
+    if ((stable && streamDoneOk) || timedOut) {
+      clearInterval(responsePoll); responsePoll = null;
+      if (text.length >= 10) finalizeResponse(text);
+      pendingCapture = null;
+    }
+  }, RESPONSE_POLL_MS);
 }
 
-function tryCapture() {
-  if (!pendingCapture) return;
-  const { cfg, countBefore } = pendingCapture;
-
-  const allResponses = [...document.querySelectorAll(cfg.response)];
-  const newResponses = allResponses.slice(countBefore);
-  if (!newResponses.length) return;
-
-  const responseEl = newResponses[newResponses.length - 1];
-  const text = responseEl?.innerText?.trim() ?? '';
-  if (text.length < 10) return;   // skip empty / skeleton elements
-
-  // Tear down observer
-  if (responseObserver) { responseObserver.disconnect(); responseObserver = null; }
-  clearTimeout(responseTimer);
-  pendingCapture = null;
-
+function finalizeResponse(text) {
   const payload = {
     type:          'PROMPT_CAPTURED',
     event_type:    'ai_response',

@@ -1,7 +1,13 @@
 // background.js — Palah service worker (Safari)
-// Safari blocks fetch() to http://localhost from extension pages (mixed content).
-// Relays captures through browser.runtime.sendNativeMessage to
-// SafariWebExtensionHandler.swift, which POSTs to the Palah agent via URLSession.
+//
+// WHY sendNativeMessage (not fetch):
+// Direct fetch('http://localhost:45678') from content.js is blocked by Safari's
+// mixed-content policy (HTTPS page → HTTP server). The native messaging bridge
+// sidesteps this: JS calls sendNativeMessage → SafariWebExtensionHandler.swift
+// receives it natively → URLSession POSTs to localhost (no mixed-content limit).
+//
+// REQUIRES the manifest to declare "nativeMessaging" in permissions.
+// Without it, sendNativeMessage silently rejects and nothing reaches the handler.
 
 'use strict';
 
