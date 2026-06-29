@@ -96,12 +96,26 @@ class PromptServer {
             return
         }
 
-        // POST /prompt — from Chrome extension or BASE_URL relay clients
+        // POST /prompt — from Chrome extension
         if method == "POST",
            let data = body.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            (json["type"] as? String) == "PROMPT_CAPTURED" {
-            logCapture(json)
+
+            if (json["event_type"] as? String) == "ai_response" {
+                // AI response: write to the existing turn file, no new session
+                logAIResponse(json)
+                respond("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\(cors)\r\n{}", to: conn)
+            } else {
+                // User prompt: create session+turn, return context for correlation
+                let (sessionId, turn) = logCapture(json)
+                let payload = "{\"session_id\":\"\(sessionId)\",\"turn\":\(turn)}\n"
+                respond(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(payload.utf8.count)\r\n\(cors)\r\n\(payload)",
+                    to: conn
+                )
+            }
+            return
         }
 
         // POST /hooks/cursor — from Cursor hooks (command type via shell script)
@@ -155,23 +169,15 @@ class PromptServer {
         // ── Prompt ───────────────────────────────────────────────────────────
 
         case "beforeSubmitPrompt":
-            sessions.openSession(sessionId: sessionId, meta: [
-                "app": "Cursor", "cursor_version": cursorVersion,
-                "model": model, "user_email": userEmail,
+            sessions.openSession(sessionId: sessionId, app: "Cursor", meta: [
+                "cursor_version": cursorVersion, "model": model, "user_email": userEmail,
             ])
-            sessions.advanceTurn(sessionId: sessionId)
+            sessions.advanceTurn(sessionId: sessionId, app: "Cursor")
             let prompt = json["prompt"] as? String ?? ""
-            let submitEntry = base.merging([
-                "event": "submit",
-                "words": prompt.split(separator: " ").count,
-                "text":  prompt,
-            ]) { $1 }
-            logPayload(submitEntry)
-            logJSON(base.merging([
-                "event":   "submit",
-                "words":   prompt.split(separator: " ").count,
-                "preview": String(prompt.prefix(120)),
-            ]) { $1 })
+            let words  = prompt.split(separator: " ").count
+            let pid    = logPayload(base.merging(["event": "submit", "words": words, "text": prompt]) { $1 })
+            sessions.recordPrompt(sessionId: sessionId, words: words, model: model, payloadId: pid)
+            logJSON(base.merging(["event": "submit", "words": words, "preview": String(prompt.prefix(120))]) { $1 })
 
         // ── Tool calls ───────────────────────────────────────────────────────
 
@@ -202,26 +208,23 @@ class PromptServer {
             return
 
         case "postToolUse":
+            let toolName  = json["tool_name"] as? String ?? ""
+            let durationMs = json["duration"] as? Int    ?? 0
             var entry = base.merging([
-                "event":       "tool_post",
-                "tool":        json["tool_name"] as? String ?? "",
-                "duration_ms": json["duration"]  as? Int    ?? 0,
+                "event": "tool_post", "tool": toolName, "duration_ms": durationMs,
             ]) { $1 }
             if let out = json["tool_output"] {
-                var payloadEntry = entry
-                payloadEntry["tool_output"] = out
+                var payloadEntry = entry; payloadEntry["tool_output"] = out
                 let pid = logPayload(payloadEntry)
                 let preview: String
-                if let s = out as? String {
-                    preview = String(s.prefix(120))
-                } else if let d = try? JSONSerialization.data(withJSONObject: out),
-                          let s = String(data: d, encoding: .utf8) {
-                    preview = String(s.prefix(120))
-                } else {
-                    preview = String("\(out)".prefix(120))
-                }
+                if let s = out as? String { preview = String(s.prefix(120)) }
+                else if let d = try? JSONSerialization.data(withJSONObject: out),
+                        let s = String(data: d, encoding: .utf8) { preview = String(s.prefix(120)) }
+                else { preview = String("\(out)".prefix(120)) }
                 entry["output_preview"] = preview
-                entry["payload_id"] = pid
+                entry["payload_id"]     = pid
+                sessions.recordToolUse(sessionId: sessionId, tool: toolName,
+                                       durationMs: durationMs, effort: "", payloadId: pid)
             }
             logJSON(entry)
 
@@ -452,23 +455,16 @@ class PromptServer {
         // ── Prompt ───────────────────────────────────────────────────────────
 
         case "UserPromptSubmit":
-            sessions.openSession(sessionId: sessionId, meta: [
-                "app": "ClaudeCode", "cwd": cwd,
-                "model": json["model"] as? String ?? "",
+            let promptModel = json["model"] as? String ?? ""
+            sessions.openSession(sessionId: sessionId, app: "ClaudeCode", meta: [
+                "cwd": cwd, "model": promptModel,
             ])
-            sessions.advanceTurn(sessionId: sessionId)
+            sessions.advanceTurn(sessionId: sessionId, app: "ClaudeCode")
             let prompt = json["prompt"] as? String ?? ""
-            let submitEntry = base.merging([
-                "event": "submit",
-                "words": prompt.split(separator: " ").count,
-                "text":  prompt,
-            ]) { $1 }
-            logPayload(submitEntry)
-            logJSON(base.merging([
-                "event":   "submit",
-                "words":   prompt.split(separator: " ").count,
-                "preview": String(prompt.prefix(120)),
-            ]) { $1 })
+            let words  = prompt.split(separator: " ").count
+            let pid    = logPayload(base.merging(["event": "submit", "words": words, "text": prompt]) { $1 })
+            sessions.recordPrompt(sessionId: sessionId, words: words, model: promptModel, payloadId: pid)
+            logJSON(base.merging(["event": "submit", "words": words, "preview": String(prompt.prefix(120))]) { $1 })
             // BLOCKING (set hooks async:false in settings.json to enable):
             // let deny = "{\"decision\":\"block\",\"reason\":\"Prompt blocked by Palah policy\"}"
             // respondClaudeJSON(deny, cors: cors, to: conn); return
@@ -510,23 +506,22 @@ class PromptServer {
             // }
 
         case "PostToolUse":
-            let toolName = json["tool_name"] as? String ?? ""
-            var entry = base.merging(["event": "tool_post", "tool": toolName]) { $1 }
+            let toolName   = json["tool_name"]   as? String ?? ""
+            let durationMs = json["duration_ms"] as? Int    ?? 0
+            let effort     = json["effort"]      as? String ?? ""
+            var entry = base.merging(["event": "tool_post", "tool": toolName, "duration_ms": durationMs]) { $1 }
             if let out = json["tool_response"] {
-                var payloadEntry = entry
-                payloadEntry["tool_response"] = out
+                var payloadEntry = entry; payloadEntry["tool_response"] = out
                 let pid = logPayload(payloadEntry)
                 let preview: String
-                if let s = out as? String {
-                    preview = String(s.prefix(120))
-                } else if let data = try? JSONSerialization.data(withJSONObject: out),
-                          let s = String(data: data, encoding: .utf8) {
-                    preview = String(s.prefix(120))
-                } else {
-                    preview = String("\(out)".prefix(120))
-                }
+                if let s = out as? String { preview = String(s.prefix(120)) }
+                else if let data = try? JSONSerialization.data(withJSONObject: out),
+                        let s = String(data: data, encoding: .utf8) { preview = String(s.prefix(120)) }
+                else { preview = String("\(out)".prefix(120)) }
                 entry["output_preview"] = preview
-                entry["payload_id"] = pid
+                entry["payload_id"]     = pid
+                sessions.recordToolUse(sessionId: sessionId, tool: toolName,
+                                       durationMs: durationMs, effort: effort, payloadId: pid)
             }
             logJSON(entry)
 
@@ -603,33 +598,91 @@ class PromptServer {
 
     // MARK: - Structured logging
 
-    private func logCapture(_ json: [String: Any]) {
+    @discardableResult
+    private func logCapture(_ json: [String: Any]) -> (sessionId: String, turn: Int) {
         let source = json["source"] as? String ?? ""
         let text   = json["text"]   as? String ?? ""
         let url    = json["url"]    as? String ?? ""
+        let app    = source == "node_options"
+                   ? (json["app"]  as? String ?? "unknown")
+                   : "chrome-\(json["tool"] as? String ?? "browser")"
 
-        var entry: [String: Any] = [
-            "ts":      timestamp(),
-            "event":   "submit",
-            "url":     url,
-            "words":   json["words"] as? Int ?? text.split(separator: " ").count,
-            "preview": String(text.prefix(120)),
+        // Each browser prompt gets a datetime-based pseudo-session (no tool-provided session ID).
+        // Format: yyyyMMdd-HHmmss — filesystem-safe, human-readable, unique per prompt.
+        let tsFmt = DateFormatter(); tsFmt.dateFormat = "yyyyMMdd-HHmmss"
+        let pseudoSessionId = tsFmt.string(from: Date())
+
+        var meta: [String: Any] = [
+            "source": source == "node_options" ? "node_options" : "extension:\(source)",
+            "url":    url,
         ]
-
         if source == "node_options" {
-            // From NODE_OPTIONS preload — richer metadata available
-            entry["source"]   = "node_options"
-            entry["app"]      = json["app"]          as? String ?? "unknown"
-            entry["pid"]      = json["pid"]
-            entry["model"]    = json["model"]
-            entry["msgCount"] = json["messageCount"]
-            entry["endpoint"] = json["endpoint"]
-        } else {
-            // From Chrome extension
-            entry["source"] = "extension:\(source)"
-            entry["app"]    = json["tool"] as? String ?? "unknown"
+            meta["model"]    = json["model"]    ?? ""
+            meta["endpoint"] = json["endpoint"] ?? ""
+        }
+        sessions.openSession(sessionId: pseudoSessionId, app: app, meta: meta)
+        sessions.advanceTurn(sessionId: pseudoSessionId, app: app)
+
+        let words = json["words"] as? Int ?? text.split(separator: " ").count
+        var base: [String: Any] = [
+            "ts":         timestamp(),
+            "event":      "submit",
+            "source":     source == "node_options" ? "node_options" : "extension:\(source)",
+            "app":        app,
+            "session_id": pseudoSessionId,
+            "url":        url,
+            "words":      words,
+        ]
+        if source == "node_options" {
+            base["pid"]      = json["pid"]
+            base["model"]    = json["model"]
+            base["msgCount"] = json["messageCount"]
+            base["endpoint"] = json["endpoint"]
         }
 
+        var payloadEntry = base
+        payloadEntry["text"]        = text
+        payloadEntry["attachments"] = json["attachments"] ?? []   // if extension sends them later
+        payloadEntry["input_tokens"]  = json["input_tokens"]  ?? NSNull()
+        payloadEntry["output_tokens"] = json["output_tokens"] ?? NSNull()
+        let pid = logPayload(payloadEntry)
+        sessions.recordPrompt(sessionId: pseudoSessionId, words: words,
+                              model: json["model"] as? String ?? "", payloadId: pid)
+
+        var logEntry = base; logEntry["preview"] = String(text.prefix(120))
+        logJSON(logEntry)
+
+        return (pseudoSessionId, sessions.currentTurn(sessionId: pseudoSessionId))
+    }
+
+    // Writes an AI response to the same turn file as the originating prompt.
+    // session_id and turn are echoed back by Palah when the prompt was captured,
+    // stored in the extension, and returned here with the response event.
+    private func logAIResponse(_ json: [String: Any]) {
+        let sessionId     = json["session_id"]    as? String ?? ""
+        let text          = json["text"]           as? String ?? ""
+        let app           = "chrome-\(json["tool"] as? String ?? "browser")"
+        let words         = json["words"]          as? Int    ?? text.split(separator: " ").count
+        let inputTokens   = json["input_tokens"]   ?? NSNull()
+        let outputTokens  = json["output_tokens"]  ?? NSNull()
+
+        var entry: [String: Any] = [
+            "ts":            timestamp(),
+            "event":         "ai_response",
+            "source":        "extension:response",
+            "app":           app,
+            "session_id":    sessionId,
+            "url":           json["url"] as? String ?? "",
+            "words":         words,
+            "input_tokens":  inputTokens,
+            "output_tokens": outputTokens,
+        ]
+
+        var payloadEntry = entry
+        payloadEntry["text"] = text
+        let pid = logPayload(payloadEntry)
+        entry["preview"]    = String(text.prefix(120))
+        entry["payload_id"] = pid
         logJSON(entry)
     }
 }

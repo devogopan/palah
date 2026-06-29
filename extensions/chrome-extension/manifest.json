@@ -32,6 +32,11 @@
     "service_worker": "background.js"
   },
 
+  "web_accessible_resources": [{
+    "resources": ["injected.js"],
+    "matches":   ["<all_urls>"]
+  }],
+
   "content_scripts": [
     {
       "matches": [
@@ -55,7 +60,7 @@
         "https://huggingface.co/*"
       ],
       "js": ["content.js"],
-      "run_at": "document_end"
+      "run_at": "document_start"
     }
   ],
 

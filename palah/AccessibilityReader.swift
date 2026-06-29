@@ -45,16 +45,16 @@ func logPayload(_ entry: [String: Any]) -> String {
     full["payload_id"] = id
 
     let sessionId = entry["session_id"] as? String ?? ""
+    let app       = entry["app"]        as? String ?? "unknown"
     let path: String
     if !sessionId.isEmpty {
-        path = sessions.payloadPath(sessionId: sessionId)
+        path = sessions.payloadPath(sessionId: sessionId, app: app)
     } else {
-        // Rare fallback for events without a session_id (AX-only captures)
+        // Fallback: no session_id (should not happen after AX/browser wiring)
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
-        let dir = sessionBaseDir
-        if !FileManager.default.fileExists(atPath: dir) {
-            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        }
+        let slug = SessionManager.slug(for: app)
+        let dir  = "\(sessionBaseDir)/\(slug)"
+        sessions.ensureDir(dir)
         path = "\(dir)/ax-\(fmt.string(from: Date())).ndjson"
     }
 
@@ -406,15 +406,41 @@ class AccessibilityReader {
             let fieldCleared = inInput  && isPlaceholder(captured)
             let leftInput    = !inInput && wasInInput
             if fieldCleared || leftInput {
-                let text = lastText
+                let text  = lastText
+                let words = text.split(separator: " ").count
+                // Datetime pseudo-session: each AX capture gets a unique session (no app-provided ID).
+                // Prefixed "ax-" so AX sessions are visually distinct from hook-based UUID sessions
+                // in the same app folder (e.g. cursor/ax-20260629-143200 vs cursor/35c770d6-...).
+                let tsFmt = DateFormatter(); tsFmt.dateFormat = "yyyyMMdd-HHmmss"
+                let pseudoSessionId = "ax-\(tsFmt.string(from: Date()))"
+                // FUTURE: For Safari (and Chrome when not using the extension), enrich the session
+                // with file attachment metadata by walking the AX tree for file-upload UI elements
+                // (e.g. AXButton with label containing "attach" or "upload", AXStaticText with
+                // filenames). Currently attachments are always empty for AX-captured sessions.
+                sessions.openSession(sessionId: pseudoSessionId, app: appName, meta: [
+                    "source": "ax", "interceptor": interceptor.name,
+                ])
+                sessions.advanceTurn(sessionId: pseudoSessionId, app: appName)
+                let pid = logPayload([
+                    "ts":         timestamp(),
+                    "event":      "submit",
+                    "source":     "ax",
+                    "app":        appName,
+                    "session_id": pseudoSessionId,
+                    "words":      words,
+                    "text":       text,
+                ])
+                sessions.recordPrompt(sessionId: pseudoSessionId, words: words,
+                                      model: "", payloadId: pid)
                 logJSON([
                     "ts":          timestamp(),
                     "event":       "submit",
                     "source":      "ax",
                     "app":         appName,
+                    "session_id":  pseudoSessionId,
                     "interceptor": interceptor.name,
-                    "role":        lastInputRole,   // role while typing, not the exit role
-                    "words":       text.split(separator: " ").count,
+                    "role":        lastInputRole,
+                    "words":       words,
                     "preview":     String(text.prefix(120)),
                 ])
                 lastCaptured = text
