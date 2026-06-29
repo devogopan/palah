@@ -20,3 +20,7 @@ build/
 # Runtime logs
 /tmp/palah.log
 xcshareddata/
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate

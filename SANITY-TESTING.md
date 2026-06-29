@@ -17,6 +17,115 @@ curl -s http://localhost:45678/health
 
 ---
 
+## Session Output Layout (classifier input)
+
+Every captured prompt/response is written to a structured session tree. This is the
+**input contract for the classifier LLM** (not yet implemented). The classifier will
+**watch `/tmp/palah-sessions` for new/modified files** and process each `turn-NNN.ndjson`
+as it appears. `/tmp/palah.log` is only a compact human-readable mirror — not the
+classifier's source.
+
+### Directory tree
+
+```
+/tmp/palah-sessions/
+  <yyyy-MM-dd>/                      # e.g. 2026-06-29 — one folder per day
+    <app-slug>/                     # capture source, see slug table below
+      <session-id>/                 # see session-id format below
+        meta.json                   # session-level metadata
+        turn-001.ndjson             # full-content events for turn 1 (prompt [+ response] [+ tool chain])
+        turn-001-meta.json          # turn-level rollup (tokens, tools, word counts, payload IDs)
+        turn-002.ndjson             # turn 2 ...
+        turn-002-meta.json
+```
+
+> `turn-NNN-meta.json` is finalized when the next turn starts (or the session ends).
+> A single-turn browser capture may have only `turn-001.ndjson` until the turn is finalized.
+
+### App slugs (`<app-slug>`)
+
+| Capture source | Slug |
+|---|---|
+| Claude Code (CLI / VS Code) | `claude-code` |
+| Cursor | `cursor` |
+| VS Code (AX) | `vscode` |
+| Claude Desktop | `claude-desktop` |
+| Safari (AX or extension) | `safari` |
+| Chrome extension | `chrome-<tool>` (e.g. `chrome-chatgpt`) |
+| Web tools (ChatGPT/Claude.ai/Gemini/Perplexity) | `chatgpt` / `claude-ai` / `gemini` / `perplexity` |
+| Anything else | lowercased, spaces/dots → `-` |
+
+### Session-id formats
+
+- **Hook sessions** (Claude Code, Cursor): the tool's own UUID — `3ab3770e-9148-4ab3-...`
+- **Extension sessions**: datetime stamp — `20260629-125438` (`yyyyMMdd-HHmmss`)
+- **AX sessions**: `ax-` + datetime — `ax-20260629-152044`
+
+### `meta.json`
+
+```json
+{
+  "app": "chrome-ChatGPT",
+  "session_id": "20260629-125438",
+  "source": "extension:enter",
+  "start": "12:54:38",
+  "end": "12:59:01",          // added on session close
+  "url": "chatgpt.com",       // browser sessions
+  "cwd": "/path",             // IDE/hook sessions
+  "model": "",
+  "turns": 4                  // added on session close
+}
+```
+
+### `turn-NNN.ndjson` — full content (one JSON object per line)
+
+Prompt event, then optional `ai_response`, then any tool events. **Full untruncated
+text lives here** — this is what the classifier scans for PII / secrets / injection.
+
+```json
+{"event":"submit","source":"extension:enter","app":"chrome-ChatGPT","session_id":"20260629-125438","payload_id":"55C888A9-...","url":"chatgpt.com","text":"what is this picture about ?","attachments":[{"name":"openclaw.png","type":"png"}],"input_tokens":null,"output_tokens":null,"words":6,"ts":"12:54:38"}
+{"event":"ai_response","source":"extension:response","app":"chrome-ChatGPT","session_id":"20260629-125438","payload_id":"37B60709-...","text":"If by \"advocate\" you mean ...","words":320,"ts":"12:54:55"}
+```
+
+### `turn-NNN-meta.json` — turn rollup (no raw text)
+
+```json
+{
+  "turn": 1,
+  "prompt_words": 16,
+  "tools": [], "tool_count": 0,
+  "attachments": [],
+  "input_tokens": null, "output_tokens": null,
+  "duration_ms_total": 0, "effort": "", "model": "",
+  "payload_count": 1,
+  "payload_ids": ["14419E0B-..."],   // join key → turn-NNN.ndjson / palah-payloads.ndjson
+  "ts_start": "11:11:18", "ts_end": "11:12:01"
+}
+```
+
+### `payload_id` is the join key
+
+Each event carries a `payload_id` UUID. The same id appears in `turn-NNN.ndjson`,
+`turn-NNN-meta.json`, and the compact `/tmp/palah.log` line. The classifier (which reads
+`turn-NNN.ndjson` via the file watch above) will write verdicts keyed by `payload_id`, so
+the dashboard can join verdicts back to the originating session/turn.
+
+> `/tmp/palah-payloads.ndjson` is a separate flat append-log of full payloads (also keyed
+> by `payload_id`). It is **not** the classifier's input under the current design — the
+> classifier watches the `/tmp/palah-sessions` tree instead.
+
+### Quick inspect
+
+```bash
+# Today's sessions by app
+ls /tmp/palah-sessions/$(date +%Y-%m-%d)/
+
+# Newest session's full content
+D=$(ls -dt /tmp/palah-sessions/$(date +%Y-%m-%d)/*/*/ | head -1); echo "$D"; cat "$D"turn-*.ndjson
+```
+
+---
+
 ## Test 1 — AX Capture: Claude Desktop
 
 **App:** Claude for Mac (`/Applications/Claude.app`)
@@ -74,6 +183,9 @@ curl -s http://localhost:45678/health
 ## Test 3 — AX Capture: Safari
 
 **App:** Safari
+
+> This is the **primary, supported** Safari capture path. The Safari Web
+> Extension (see Test 9) is parked pending code signing — AX covers Safari today.
 
 | Step | Action |
 |---|---|
@@ -202,6 +314,52 @@ Same as Test 7, but triggered from the VS Code Claude panel instead of the CLI.
 
 ---
 
+## Test 9 — Safari Web Extension (PARKED — needs code signing)
+
+**Status:** ⏸️ Not active. Code is complete and retained, but blocked by Safari's
+unsigned-extension friction. Safari prompt capture is covered by AX (Test 3) today.
+Resume this once the extension is signed with an Apple Developer identity.
+
+**What's built (all retained, does not affect other paths):**
+
+| Piece | File | Role |
+|---|---|---|
+| Content script | `extensions/safari-extension/content.js` | Detects prompt/response in the page, relays via `chrome.runtime.sendMessage` |
+| Service worker | `extensions/safari-extension/background.js` | Receives the message, calls `browser.runtime.sendNativeMessage` |
+| Manifest | `extensions/safari-extension/manifest.json` | MV3 + `nativeMessaging` permission (the key difference from the Chrome manifest) |
+| Native handler | `Palah Safari Extension/Shared (Extension)/SafariWebExtensionHandler.swift` | Receives the native message, `URLSession` POSTs to `localhost:45678/prompt` |
+| Entitlements | `macOS (Extension)/Palah_Safari_Extension_Extension.entitlements` | `network.client` so the handler can reach localhost |
+| ATS exception | `macOS (Extension)/Info.plist` | Allows the http (non-TLS) localhost POST |
+
+**Relay flow (when signed):**
+```
+content.js → sendMessage → background.js → sendNativeMessage
+  → SafariWebExtensionHandler (native Swift) → URLSession POST :45678/prompt
+  → PromptServer /prompt handler (same endpoint Chrome uses)
+```
+The POST payload is identical to Chrome's (`type: "PROMPT_CAPTURED"`), so captures
+appear as `source: "extension:<hostname>"` — same as Test 4.
+
+**Why it's parked:** the build is ad-hoc signed (`Signature=adhoc`, no team). Safari
+then hides the real install unless **Develop → Allow Unsigned Extensions** is on, and
+that resets every Safari restart. Temporary-extension loading does **not** support
+native messaging, so it can't be used as a substitute. A real signing identity removes
+all of this.
+
+**To resume / verify once signed:**
+```bash
+# Watch the native handler directly (works regardless of the JS inspector):
+log stream --predicate 'subsystem == "com.devogopan.palah.safari"' --info
+```
+| Log line | Meaning |
+|---|---|
+| `PALAH: beginRequest invoked` | native message reached the handler |
+| `PALAH: POSTing N bytes ...` → `POST ok, status 200` | full relay working — check `/tmp/palah.log` |
+| `PALAH: POST failed: ...` | bridge works, localhost POST blocked (check entitlement/ATS) |
+| (nothing) | `sendNativeMessage` not reaching native — extension not installed/signed properly |
+
+---
+
 ## Scorecard
 
 | # | Method | App | Status | Notes |
@@ -216,6 +374,7 @@ Same as Test 7, but triggered from the VS Code Claude panel instead of the CLI.
 | 6 | Cursor hook | Cursor agent | ☐ Pass / ☐ Fail | |
 | 7 | Claude Code hook | claude CLI | ☐ Pass / ☐ Fail | |
 | 8 | Claude Code hook | VS Code extension | ☐ Pass / ☐ Fail | |
+| 9 | Safari Web Extension | Safari | ⏸️ Parked | Needs code signing; AX (Test 3) covers Safari for now |
 
 ---
 
@@ -227,6 +386,7 @@ Same as Test 7, but triggered from the VS Code Claude panel instead of the CLI.
 | Cursor built-in subscription AI (non-Sonnet) | Same process, no hook for non-API path | AX capture gets the prompt text |
 | Short prompts < 3 chars via AX | Filtered to prevent backspace false positives | Hooks capture these correctly |
 | AX capture requires app to be frontmost | macOS AX limitation | Hooks cover background sessions |
+| Safari Web Extension (responses, tokens) | Unsigned-extension friction blocks native messaging | AX (Test 3) captures Safari prompts; sign the extension to enable richer capture |
 
 ---
 
@@ -259,3 +419,8 @@ ls -la ~/.claude/hooks/palah-hook.sh # Script exists and is executable?
 - Check `chrome://extensions` — Palah extension is enabled
 - Check the extension has host permissions for the site
 - Open DevTools console on the page and look for extension errors
+
+**Safari Web Extension (parked):**
+- Safari prompt capture is expected via AX (Test 3), not the extension.
+- If resuming the extension: it must be **signed** (ad-hoc/temporary loading
+  does not support native messaging). See Test 9 for the `log stream` diagnostic.
