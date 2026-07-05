@@ -353,6 +353,18 @@ log stream --predicate 'subsystem == "com.devogopan.palah.safari"' --info
 
 ---
 
+## Test 10 — MCP Tool Capture: GitHub Server
+
+**Claude Code:** Ask `list open PRs in <owner>/<repo>` in a `claude` session.
+Check: `grep -o '"tool":"mcp__[^"]*"' /tmp/palah-sessions/$(date +%Y-%m-%d)/claude-code/*/turn-*.ndjson`
+Expected: `"tool":"mcp__github__list_pull_requests"` (or similar) in the turn file.
+
+**Cursor:** Ask the same in Cursor agent mode.
+Check: `grep -E '"event":"mcp_(pre|post)"' /tmp/palah-sessions/$(date +%Y-%m-%d)/cursor/*/turn-*.ndjson`
+Expected: `mcp_pre` / `mcp_post` events with `"mcp_server":"github"`.
+
+---
+
 ## Scorecard
 
 | # | Method | App | Status | Notes |
@@ -368,6 +380,8 @@ log stream --predicate 'subsystem == "com.devogopan.palah.safari"' --info
 | 7 | Claude Code hook | claude CLI | ☐ Pass / ☐ Fail | |
 | 8 | Claude Code hook | VS Code extension | ☐ Pass / ☐ Fail | |
 | 9 | Safari Web Extension | Safari | ⏸️ Parked | Needs code signing; AX (Test 3) covers Safari for now |
+| 10a | MCP hook | Claude Code + GitHub MCP | ☐ Pass / ☐ Fail | |
+| 10b | MCP hook | Cursor + GitHub MCP | ☐ Pass / ☐ Fail | |
 
 ---
 
