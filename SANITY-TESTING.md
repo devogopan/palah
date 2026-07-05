@@ -353,6 +353,42 @@ log stream --predicate 'subsystem == "com.devogopan.palah.safari"' --info
 
 ---
 
+## Test 11 — OpenClaw: Session Capture
+
+**No install needed.** Palah deploys and starts the watcher automatically on launch.
+Verify watcher started:
+```bash
+cat /tmp/palah-openclaw-watcher.log   # should show "[palah-openclaw] ready"
+```
+
+**GitHub skill test (read-only):**
+```bash
+# Install skill once
+mkdir -p /tmp/openclaw-github-skill
+curl -sL "https://raw.githubusercontent.com/openclaw/openclaw/main/skills/github/SKILL.md" \
+  -o /tmp/openclaw-github-skill/SKILL.md
+openclaw skills install /tmp/openclaw-github-skill
+
+# Start gateway (no NODE_OPTIONS needed — watcher handles capture)
+openclaw gateway --port 18789 --verbose &
+
+# Send a read-only GitHub prompt
+openclaw agent --agent main --message "list the open issues in openclaw/openclaw repo"
+```
+
+**Expected session output:**
+```bash
+D=$(ls -dt /tmp/palah-sessions/$(date +%Y-%m-%d)/openclaw/*/ | head -1)
+cat "$D"turn-*.ndjson | python3 -c "import sys,json; [print(o['event'], o.get('words',''), o.get('source','')) for o in [json.loads(l) for l in sys.stdin]]"
+# submit   7   openclaw_session
+# ai_response  463  openclaw_session:response
+```
+
+**What's captured:** user prompt, full AI response text, input/output token counts, OpenClaw session UUID (consistent across multi-turn conversations).
+**What's not captured:** individual tool calls inside OpenClaw (e.g. the `gh issue list` invocation) — only the final assistant reply. Tool-level capture requires the OpenClaw plugin SDK.
+
+---
+
 ## Test 10 — MCP Tool Capture: GitHub Server
 
 **Claude Code:** Ask `list open PRs in <owner>/<repo>` in a `claude` session.
@@ -382,6 +418,7 @@ Expected: `mcp_pre` / `mcp_post` events with `"mcp_server":"github"`.
 | 9 | Safari Web Extension | Safari | ⏸️ Parked | Needs code signing; AX (Test 3) covers Safari for now |
 | 10a | MCP hook | Claude Code + GitHub MCP | ☐ Pass / ☐ Fail | |
 | 10b | MCP hook | Cursor + GitHub MCP | ☐ Pass / ☐ Fail | |
+| 11 | Session watcher | OpenClaw (any skill) | ☐ Pass / ☐ Fail | Tool calls not captured, only prompt+response |
 
 ---
 

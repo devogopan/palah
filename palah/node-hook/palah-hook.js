@@ -29,7 +29,8 @@ const AI_HOSTS = new Set([
 ]);
 
 // Only intercept these endpoint patterns — skip auth, billing, model-list endpoints
-const CHAT_PATH_RE = /\/(messages|completions|chat)/;
+// Covers: Anthropic /messages, OpenAI /completions|/chat, Google /generateContent|/streamGenerateContent
+const CHAT_PATH_RE = /\/(messages|completions|chat|generateContent|streamGenerateContent)/;
 
 const PALAH_HOST = '127.0.0.1';
 const PALAH_PORT = 45678;
@@ -80,19 +81,29 @@ function pathFrom(options) {
 }
 
 // Parses an AI API JSON body and extracts the prompt text + metadata.
-// Handles both OpenAI chat format and Anthropic messages format.
+// Handles OpenAI/Anthropic messages format and Google Gemini contents format.
 function parseAndReport(bodyStr, hostname, path) {
   try {
-    const json     = JSON.parse(bodyStr);
-    const messages = json.messages || [];
+    const json = JSON.parse(bodyStr);
+    let text     = '';
+    let messages = [];
 
-    const lastUser = [...messages].reverse().find(m => m.role === 'user');
-    const content  = lastUser?.content ?? '';
-    const text = typeof content === 'string'
-      ? content
-      : Array.isArray(content)
-        ? content.filter(c => c.type === 'text').map(c => c.text).join(' ')
-        : '';
+    if (json.messages) {
+      // OpenAI chat / Anthropic messages format
+      messages       = json.messages;
+      const lastUser = [...messages].reverse().find(m => m.role === 'user');
+      const content  = lastUser?.content ?? '';
+      text = typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content.filter(c => c.type === 'text').map(c => c.text).join(' ')
+          : '';
+    } else if (json.contents) {
+      // Google Gemini format: { contents: [{ role, parts: [{ text }] }] }
+      messages       = json.contents;
+      const lastUser = [...messages].reverse().find(m => m.role === 'user');
+      text = (lastUser?.parts ?? []).filter(p => p.text).map(p => p.text).join(' ');
+    }
 
     report({
       app:          processLabel(),
@@ -161,10 +172,13 @@ if (typeof globalThis.fetch === 'function') {
       const path     = parsed.pathname;
 
       if (AI_HOSTS.has(hostname) && CHAT_PATH_RE.test(path) && init?.body) {
-        // Only handle string bodies — ReadableStream bodies are left alone
+        let bodyStr = null;
         if (typeof init.body === 'string') {
-          parseAndReport(init.body, hostname, path);
+          bodyStr = init.body;
+        } else if (init.body instanceof Uint8Array || Buffer.isBuffer(init.body)) {
+          bodyStr = Buffer.from(init.body).toString('utf8');
         }
+        if (bodyStr) parseAndReport(bodyStr, hostname, path);
       }
     } catch (_) {}
 

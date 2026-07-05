@@ -603,73 +603,101 @@ class PromptServer {
         let source = json["source"] as? String ?? ""
         let text   = json["text"]   as? String ?? ""
         let url    = json["url"]    as? String ?? ""
-        let app    = source == "node_options"
-                   ? (json["app"]  as? String ?? "unknown")
-                   : "chrome-\(json["tool"] as? String ?? "browser")"
+        let app: String
+        switch source {
+        case "node_options", "openclaw_session":
+            app = json["app"] as? String ?? "unknown"
+        default:
+            app = "chrome-\(json["tool"] as? String ?? "browser")"
+        }
 
-        // Each browser prompt gets a datetime-based pseudo-session (no tool-provided session ID).
-        // Format: yyyyMMdd-HHmmss — filesystem-safe, human-readable, unique per prompt.
-        let tsFmt = DateFormatter(); tsFmt.dateFormat = "yyyyMMdd-HHmmss"
-        let pseudoSessionId = tsFmt.string(from: Date())
+        // Session ID: use the caller-provided ID when available (OpenClaw, node_options),
+        // otherwise generate a datetime-based pseudo-ID for browser extension captures.
+        let sessionId: String
+        if let provided = json["session_id"] as? String, !provided.isEmpty,
+           source == "openclaw_session" || source == "node_options" {
+            sessionId = provided
+        } else {
+            let tsFmt = DateFormatter(); tsFmt.dateFormat = "yyyyMMdd-HHmmss"
+            sessionId = tsFmt.string(from: Date())
+        }
 
-        var meta: [String: Any] = [
-            "source": source == "node_options" ? "node_options" : "extension:\(source)",
-            "url":    url,
-        ]
-        if source == "node_options" {
+        var meta: [String: Any] = ["source": source, "url": url]
+        switch source {
+        case "node_options":
             meta["model"]    = json["model"]    ?? ""
             meta["endpoint"] = json["endpoint"] ?? ""
+        case "openclaw_session":
+            meta["model"]    = json["model"]    ?? ""
+        default:
+            break
         }
-        sessions.openSession(sessionId: pseudoSessionId, app: app, meta: meta)
-        sessions.advanceTurn(sessionId: pseudoSessionId, app: app)
+        sessions.openSession(sessionId: sessionId, app: app, meta: meta)
+        sessions.advanceTurn(sessionId: sessionId, app: app)
 
         let words = json["words"] as? Int ?? text.split(separator: " ").count
         var base: [String: Any] = [
             "ts":         timestamp(),
             "event":      "submit",
-            "source":     source == "node_options" ? "node_options" : "extension:\(source)",
+            "source":     source,
             "app":        app,
-            "session_id": pseudoSessionId,
+            "session_id": sessionId,
             "url":        url,
             "words":      words,
         ]
-        if source == "node_options" {
+        switch source {
+        case "node_options":
             base["pid"]      = json["pid"]
             base["model"]    = json["model"]
             base["msgCount"] = json["messageCount"]
             base["endpoint"] = json["endpoint"]
+        case "openclaw_session":
+            base["model"]    = json["model"]
+        default:
+            break
         }
 
         var payloadEntry = base
-        payloadEntry["text"]        = text
-        payloadEntry["attachments"] = json["attachments"] ?? []   // if extension sends them later
+        payloadEntry["text"]          = text
+        payloadEntry["attachments"]   = json["attachments"] ?? []
         payloadEntry["input_tokens"]  = json["input_tokens"]  ?? NSNull()
         payloadEntry["output_tokens"] = json["output_tokens"] ?? NSNull()
         let pid = logPayload(payloadEntry)
-        sessions.recordPrompt(sessionId: pseudoSessionId, words: words,
+        sessions.recordPrompt(sessionId: sessionId, words: words,
                               model: json["model"] as? String ?? "", payloadId: pid)
 
         var logEntry = base; logEntry["preview"] = String(text.prefix(120))
         logJSON(logEntry)
 
-        return (pseudoSessionId, sessions.currentTurn(sessionId: pseudoSessionId))
+        return (sessionId, sessions.currentTurn(sessionId: sessionId))
     }
 
     // Writes an AI response to the same turn file as the originating prompt.
     // session_id and turn are echoed back by Palah when the prompt was captured,
     // stored in the extension, and returned here with the response event.
     private func logAIResponse(_ json: [String: Any]) {
-        let sessionId     = json["session_id"]    as? String ?? ""
-        let text          = json["text"]           as? String ?? ""
-        let app           = "chrome-\(json["tool"] as? String ?? "browser")"
-        let words         = json["words"]          as? Int    ?? text.split(separator: " ").count
-        let inputTokens   = json["input_tokens"]   ?? NSNull()
-        let outputTokens  = json["output_tokens"]  ?? NSNull()
+        let sessionId    = json["session_id"]   as? String ?? ""
+        let source       = json["source"]       as? String ?? ""
+        let text         = json["text"]         as? String ?? ""
+        let words        = json["words"]        as? Int    ?? text.split(separator: " ").count
+        let inputTokens  = json["input_tokens"] ?? NSNull()
+        let outputTokens = json["output_tokens"] ?? NSNull()
+
+        let app: String
+        let eventSource: String
+        switch source {
+        case "openclaw_session":
+            app = json["app"] as? String ?? "openclaw"
+            eventSource = "openclaw_session:response"
+        default:
+            app = "chrome-\(json["tool"] as? String ?? "browser")"
+            eventSource = "extension:response"
+        }
 
         var entry: [String: Any] = [
             "ts":            timestamp(),
             "event":         "ai_response",
-            "source":        "extension:response",
+            "source":        eventSource,
             "app":           app,
             "session_id":    sessionId,
             "url":           json["url"] as? String ?? "",

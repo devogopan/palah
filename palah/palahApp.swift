@@ -18,8 +18,9 @@ struct PalahApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var reader: AccessibilityReader?
-    var server: PromptServer?
+    var reader:  AccessibilityReader?
+    var server:  PromptServer?
+    var ocWatcher: OpenClawWatcher?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)  // hide from Dock
@@ -27,5 +28,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         server?.start()
         reader = AccessibilityReader()
         reader?.start()
+        ocWatcher = OpenClawWatcher()
+        ocWatcher?.start()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        ocWatcher?.stop()
     }
 }
