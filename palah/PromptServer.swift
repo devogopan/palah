@@ -367,11 +367,16 @@ class PromptServer {
 
         case "afterAgentResponse":
             let text = json["text"] as? String ?? ""
-            logJSON(base.merging([
-                "event":            "agent_response",
-                "response_words":   text.split(separator: " ").count,
-                "response_preview": String(text.prefix(120)),
-            ]) { $1 })
+            var entry = base.merging([
+                "event":          "agent_response",
+                "response_words": text.split(separator: " ").count,
+                "text":           text,
+            ]) { $1 }
+            let pid = logPayload(entry)
+            entry.removeValue(forKey: "text")
+            entry["response_preview"] = String(text.prefix(120))
+            entry["payload_id"]       = pid
+            logJSON(entry)
 
         // ── Session lifecycle ─────────────────────────────────────────────────
 
@@ -689,6 +694,9 @@ class PromptServer {
         case "openclaw_session":
             app = json["app"] as? String ?? "openclaw"
             eventSource = "openclaw_session:response"
+        case "node_options":
+            app = json["app"] as? String ?? "node"
+            eventSource = "node_options:response"
         default:
             app = "chrome-\(json["tool"] as? String ?? "browser")"
             eventSource = "extension:response"

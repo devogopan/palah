@@ -63,7 +63,7 @@ const SITE_CONFIG = {
     attachments:  '[class*="attachment"], [class*="file-chip"], [aria-label*="attachment" i]',
     response:     'model-response, [class*="model-response"]',
     responseRoot: '[class*="conversation-container"], main',
-    streamDone:   () => !document.querySelector('[class*="loading"], [class*="generating"]'),
+    streamDone:   () => true,   // Gemini has a persistent loading element — use content-stability only
   },
   'perplexity.ai': {
     attachments:  '[class*="attachment"], [class*="file"]',
