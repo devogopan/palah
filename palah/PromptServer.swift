@@ -697,6 +697,9 @@ class PromptServer {
         case "node_options":
             app = json["app"] as? String ?? "node"
             eventSource = "node_options:response"
+        case "claude_session":
+            app = json["app"] as? String ?? "ClaudeCode"
+            eventSource = "claude_session:response"
         default:
             app = "chrome-\(json["tool"] as? String ?? "browser")"
             eventSource = "extension:response"

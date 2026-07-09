@@ -1,17 +1,12 @@
 'use strict';
-// openclaw-session-watcher.js
+// palah-session-watcher.js
 //
-// Watches ~/.openclaw/agents/*/sessions/*.jsonl for new conversation turns
-// and POSTs them to Palah (localhost:45678/prompt).
+// Watches session JSONL files for two AI tools and POSTs new turns to Palah:
+//   OpenClaw  — ~/.openclaw/agents/*/sessions/*.jsonl
+//   Claude Code — ~/.claude/projects/*/<session-uuid>.jsonl
 //
-// How it works:
-//   OpenClaw appends one JSON object per line to session JSONL files as the
-//   conversation progresses. This script uses fs.watch to detect new writes,
-//   then reads only the new bytes (tail-style cursor tracking), parses each
-//   line, and reports user prompts and assistant responses to Palah.
-//
-// Run: node openclaw-session-watcher.js
-// Or as a daemon via launchd alongside the OpenClaw gateway.
+// Uses per-file fs.watch so appends to existing files are caught on macOS
+// (directory-level watch only fires for creation/rename, not content changes).
 
 const fs   = require('fs');
 const path = require('path');
@@ -19,25 +14,20 @@ const http = require('http');
 const os   = require('os');
 
 const PALAH_PORT   = 45678;
-const AGENTS_DIR   = path.join(os.homedir(), '.openclaw', 'agents');
+const OPENCLAW_DIR = path.join(os.homedir(), '.openclaw', 'agents');
+const CLAUDE_DIR   = path.join(os.homedir(), '.claude', 'projects');
 
-// byte-cursor per file so we only process new lines (never replay old ones)
+// byte-cursor per file — only process new bytes (never replay history)
 const cursors = new Map();
 
-// ─── Reporting ───────────────────────────────────────────────────────────────
+// ─── Reporting ────────────────────────────────────────────────────────────────
 
-function report(payload) {
+function post(source, payload) {
   try {
-    const body = JSON.stringify({ type: 'PROMPT_CAPTURED', source: 'openclaw_session', ...payload });
+    const body = JSON.stringify({ type: 'PROMPT_CAPTURED', source, ...payload });
     const req  = http.request({
-      hostname: '127.0.0.1',
-      port:     PALAH_PORT,
-      path:     '/prompt',
-      method:   'POST',
-      headers: {
-        'Content-Type':   'application/json',
-        'Content-Length': Buffer.byteLength(body),
-      },
+      hostname: '127.0.0.1', port: PALAH_PORT, path: '/prompt', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
     });
     req.on('error', () => {});
     req.write(body);
@@ -45,137 +35,152 @@ function report(payload) {
   } catch (_) {}
 }
 
-// ─── JSONL parsing ───────────────────────────────────────────────────────────
+// ─── OpenClaw JSONL parser ────────────────────────────────────────────────────
+// Format: { type: "message", message: { role, content: [{type:"text",text}], usage:{input,output} } }
 
-function processLine(sessionId, obj) {
+function processOpenClawLine(sessionId, obj) {
   if (obj.type !== 'message') return;
   const msg = obj.message;
   if (!msg) return;
+  const content = msg.content ?? [];
+  const text = (Array.isArray(content)
+    ? content.filter(p => p.type === 'text').map(p => p.text).join(' ')
+    : '').trim();
+  if (!text) return;
 
-  const content  = msg.content ?? [];
-  const textParts = Array.isArray(content)
-    ? content.filter(p => p.type === 'text').map(p => p.text).join(' ').trim()
-    : '';
-
-  if (msg.role === 'user' && textParts) {
-    report({
-      event_type: 'user_prompt',
-      app:        'openclaw',
-      text:       textParts,
-      words:      textParts.split(/\s+/).length,
-      session_id: sessionId,
-      timestamp:  Date.now(),
+  if (msg.role === 'user') {
+    post('openclaw_session', {
+      event_type: 'user_prompt', app: 'openclaw', text,
+      words: text.split(/\s+/).length, session_id: sessionId, timestamp: Date.now(),
     });
-
-  } else if (msg.role === 'assistant' && textParts) {
+  } else if (msg.role === 'assistant') {
     const usage = msg.usage ?? {};
-    report({
-      event_type:    'ai_response',
-      app:           'openclaw',
-      text:          textParts,
-      words:         textParts.split(/\s+/).length,
-      session_id:    sessionId,
-      model:         msg.model ?? '',
-      input_tokens:  usage.input  ?? null,
-      output_tokens: usage.output ?? null,
-      timestamp:     Date.now(),
+    post('openclaw_session', {
+      event_type: 'ai_response', app: 'openclaw', text,
+      words: text.split(/\s+/).length, session_id: sessionId,
+      model: msg.model ?? '', input_tokens: usage.input ?? null,
+      output_tokens: usage.output ?? null, timestamp: Date.now(),
     });
   }
 }
 
-// ─── File tailing ────────────────────────────────────────────────────────────
+// ─── Claude Code JSONL parser ─────────────────────────────────────────────────
+// Format: { parentUuid, message: { role, content: [{type:"text",text}], usage:{input_tokens,output_tokens,...} } }
+// User prompts are already captured by the claude_hook (UserPromptSubmit).
+// We only report assistant responses so there are no duplicates.
 
-function readNewLines(filePath) {
+function processClaudeCodeLine(sessionId, obj) {
+  const msg = obj.message;
+  if (!msg || msg.role !== 'assistant') return;
+  const content = msg.content ?? [];
+  const text = (Array.isArray(content)
+    ? content.filter(p => p.type === 'text').map(p => p.text).join('')
+    : '').trim();
+  if (!text) return;
+
+  const usage = msg.usage ?? {};
+  post('claude_session', {
+    event_type:    'ai_response',
+    app:           'ClaudeCode',
+    text,
+    words:         text.split(/\s+/).length,
+    session_id:    sessionId,
+    model:         msg.model ?? '',
+    input_tokens:  usage.input_tokens  ?? null,
+    output_tokens: usage.output_tokens ?? null,
+    timestamp:     Date.now(),
+  });
+}
+
+// ─── File tailing ─────────────────────────────────────────────────────────────
+
+function readNewLines(filePath, processor) {
   try {
     const stat   = fs.statSync(filePath);
     const cursor = cursors.get(filePath) ?? 0;
     if (stat.size <= cursor) return;
-
-    const newBytes = stat.size - cursor;
-    const buf = Buffer.alloc(newBytes);
+    const buf = Buffer.alloc(stat.size - cursor);
     const fd  = fs.openSync(filePath, 'r');
-    fs.readSync(fd, buf, 0, newBytes, cursor);
+    fs.readSync(fd, buf, 0, buf.length, cursor);
     fs.closeSync(fd);
     cursors.set(filePath, stat.size);
-
     const sessionId = path.basename(filePath, '.jsonl');
     for (const line of buf.toString('utf8').split('\n')) {
-      if (!line.trim()) continue;
-      try { processLine(sessionId, JSON.parse(line)); } catch (_) {}
+      if (line.trim()) try { processor(sessionId, JSON.parse(line)); } catch (_) {}
     }
   } catch (_) {}
 }
 
-// ─── Directory watching ──────────────────────────────────────────────────────
-
-// Watch a single JSONL file for content changes.
-// fs.watch(directory) on macOS fires for creation/rename but NOT for content
-// modifications to existing files — so we must watch each file individually.
-function watchFile(filePath) {
-  try {
-    fs.watch(filePath, () => readNewLines(filePath));
-  } catch (_) {}
+// Watch a single file. fs.watch(directory) on macOS does not fire for content
+// modifications to existing files — each file must be watched individually.
+function watchFile(filePath, processor) {
+  try { fs.watch(filePath, () => readNewLines(filePath, processor)); } catch (_) {}
 }
 
-function watchSessionsDir(sessionsDir) {
-  try {
-    if (!fs.statSync(sessionsDir).isDirectory()) return;
-  } catch (_) { return; }
+// ─── Generic directory watcher ────────────────────────────────────────────────
 
-  // Initialise cursors at current EOF and watch each existing file for appends
+function watchDir(dir, processor) {
+  try { if (!fs.statSync(dir).isDirectory()) return; } catch (_) { return; }
+  // Initialise cursors at EOF and watch each existing JSONL file
   try {
-    for (const file of fs.readdirSync(sessionsDir)) {
-      if (!file.endsWith('.jsonl')) continue;
-      const fp   = path.join(sessionsDir, file);
-      const stat = fs.statSync(fp);
-      cursors.set(fp, stat.size);
-      watchFile(fp);
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const fp = path.join(dir, f);
+      cursors.set(fp, fs.statSync(fp).size);
+      watchFile(fp, processor);
     }
   } catch (_) {}
-
-  // Watch directory for newly created session files
+  // Watch for newly created session files
   try {
-    fs.watch(sessionsDir, (_, filename) => {
+    fs.watch(dir, (_, filename) => {
       if (!filename?.endsWith('.jsonl')) return;
-      const fp = path.join(sessionsDir, filename);
-      if (!cursors.has(fp)) {
-        cursors.set(fp, 0);
-        watchFile(fp);
-      }
-      readNewLines(fp);
+      const fp = path.join(dir, filename);
+      if (!cursors.has(fp)) { cursors.set(fp, 0); watchFile(fp, processor); }
+      readNewLines(fp, processor);
     });
-    console.log(`[palah-openclaw] watching ${sessionsDir}`);
+    process.stderr.write('[palah-watcher] watching ' + dir + '\n');
   } catch (_) {}
 }
 
-function watchAgentsDir(agentsDir) {
-  try {
-    if (!fs.statSync(agentsDir).isDirectory()) {
-      console.error(`[palah-openclaw] agents dir not found: ${agentsDir}`);
-      return;
-    }
-  } catch (_) {
-    console.error(`[palah-openclaw] agents dir not found: ${agentsDir}`);
+// ─── OpenClaw — ~/.openclaw/agents/<agent>/sessions/ ─────────────────────────
+
+function watchOpenClaw(agentsDir) {
+  try { fs.statSync(agentsDir); } catch (_) {
+    process.stderr.write('[palah-watcher] openclaw not found — idle\n');
     return;
   }
-
-  // Watch existing agents
   try {
-    for (const agent of fs.readdirSync(agentsDir)) {
-      watchSessionsDir(path.join(agentsDir, agent, 'sessions'));
-    }
+    for (const agent of fs.readdirSync(agentsDir))
+      watchDir(path.join(agentsDir, agent, 'sessions'), processOpenClawLine);
   } catch (_) {}
-
-  // Watch for new agent directories being created
-  fs.watch(agentsDir, (_, agentName) => {
-    if (!agentName) return;
-    watchSessionsDir(path.join(agentsDir, agentName, 'sessions'));
-  });
+  try {
+    fs.watch(agentsDir, (_, agentName) => {
+      if (agentName) watchDir(path.join(agentsDir, agentName, 'sessions'), processOpenClawLine);
+    });
+  } catch (_) {}
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
+// ─── Claude Code — ~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl ─────────
 
-console.log(`[palah-openclaw] session watcher starting`);
-console.log(`[palah-openclaw] reporting to localhost:${PALAH_PORT}`);
-watchAgentsDir(AGENTS_DIR);
-console.log(`[palah-openclaw] ready — Ctrl-C to stop`);
+function watchClaudeCode(projectsDir) {
+  try { fs.statSync(projectsDir); } catch (_) {
+    process.stderr.write('[palah-watcher] claude projects not found — idle\n');
+    return;
+  }
+  try {
+    for (const proj of fs.readdirSync(projectsDir))
+      watchDir(path.join(projectsDir, proj), processClaudeCodeLine);
+  } catch (_) {}
+  try {
+    fs.watch(projectsDir, (_, projName) => {
+      if (projName) watchDir(path.join(projectsDir, projName), processClaudeCodeLine);
+    });
+  } catch (_) {}
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+process.stderr.write('[palah-watcher] starting\n');
+watchOpenClaw(OPENCLAW_DIR);
+watchClaudeCode(CLAUDE_DIR);
+process.stderr.write('[palah-watcher] ready\n');

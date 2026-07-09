@@ -55,23 +55,25 @@ class OpenClawWatcher {
 
     private static let watcherJS = #"""
 'use strict';
-// openclaw-session-watcher.js — auto-deployed by Palah.app on launch.
-// Watches ~/.openclaw/agents/*/sessions/*.jsonl for new conversation turns
-// and POSTs them to Palah (localhost:45678/prompt).
+// palah-session-watcher.js — auto-deployed by Palah.app on launch.
+// Watches session JSONL files for two AI tools and POSTs new turns to Palah:
+//   OpenClaw    — ~/.openclaw/agents/*/sessions/*.jsonl
+//   Claude Code — ~/.claude/projects/*/<session-uuid>.jsonl
 
 const fs   = require('fs');
 const path = require('path');
 const http = require('http');
 const os   = require('os');
 
-const PALAH_PORT = 45678;
-const AGENTS_DIR = path.join(os.homedir(), '.openclaw', 'agents');
+const PALAH_PORT   = 45678;
+const OPENCLAW_DIR = path.join(os.homedir(), '.openclaw', 'agents');
+const CLAUDE_DIR   = path.join(os.homedir(), '.claude', 'projects');
 
 const cursors = new Map();
 
-function report(payload) {
+function post(source, payload) {
   try {
-    const body = JSON.stringify({ type: 'PROMPT_CAPTURED', source: 'openclaw_session', ...payload });
+    const body = JSON.stringify({ type: 'PROMPT_CAPTURED', source, ...payload });
     const req  = http.request({
       hostname: '127.0.0.1', port: PALAH_PORT, path: '/prompt', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
@@ -82,27 +84,42 @@ function report(payload) {
   } catch (_) {}
 }
 
-function processLine(sessionId, obj) {
+function processOpenClawLine(sessionId, obj) {
   if (obj.type !== 'message') return;
   const msg = obj.message;
   if (!msg) return;
-  const content   = msg.content ?? [];
-  const textParts = Array.isArray(content)
-    ? content.filter(p => p.type === 'text').map(p => p.text).join(' ').trim()
-    : '';
-  if (msg.role === 'user' && textParts) {
-    report({ event_type: 'user_prompt', app: 'openclaw', text: textParts,
-             words: textParts.split(/\s+/).length, session_id: sessionId, timestamp: Date.now() });
-  } else if (msg.role === 'assistant' && textParts) {
+  const content = msg.content ?? [];
+  const text = (Array.isArray(content)
+    ? content.filter(p => p.type === 'text').map(p => p.text).join(' ')
+    : '').trim();
+  if (!text) return;
+  if (msg.role === 'user') {
+    post('openclaw_session', { event_type: 'user_prompt', app: 'openclaw', text,
+      words: text.split(/\s+/).length, session_id: sessionId, timestamp: Date.now() });
+  } else if (msg.role === 'assistant') {
     const usage = msg.usage ?? {};
-    report({ event_type: 'ai_response', app: 'openclaw', text: textParts,
-             words: textParts.split(/\s+/).length, session_id: sessionId,
-             model: msg.model ?? '', input_tokens: usage.input ?? null,
-             output_tokens: usage.output ?? null, timestamp: Date.now() });
+    post('openclaw_session', { event_type: 'ai_response', app: 'openclaw', text,
+      words: text.split(/\s+/).length, session_id: sessionId, model: msg.model ?? '',
+      input_tokens: usage.input ?? null, output_tokens: usage.output ?? null, timestamp: Date.now() });
   }
 }
 
-function readNewLines(filePath) {
+function processClaudeCodeLine(sessionId, obj) {
+  const msg = obj.message;
+  if (!msg || msg.role !== 'assistant') return;
+  const content = msg.content ?? [];
+  const text = (Array.isArray(content)
+    ? content.filter(p => p.type === 'text').map(p => p.text).join('')
+    : '').trim();
+  if (!text) return;
+  const usage = msg.usage ?? {};
+  post('claude_session', { event_type: 'ai_response', app: 'ClaudeCode', text,
+    words: text.split(/\s+/).length, session_id: sessionId, model: msg.model ?? '',
+    input_tokens: usage.input_tokens ?? null, output_tokens: usage.output_tokens ?? null,
+    timestamp: Date.now() });
+}
+
+function readNewLines(filePath, processor) {
   try {
     const stat   = fs.statSync(filePath);
     const cursor = cursors.get(filePath) ?? 0;
@@ -114,66 +131,70 @@ function readNewLines(filePath) {
     cursors.set(filePath, stat.size);
     const sessionId = path.basename(filePath, '.jsonl');
     for (const line of buf.toString('utf8').split('\n')) {
-      if (line.trim()) try { processLine(sessionId, JSON.parse(line)); } catch (_) {}
+      if (line.trim()) try { processor(sessionId, JSON.parse(line)); } catch (_) {}
     }
   } catch (_) {}
 }
 
-// Watch a single JSONL file for content changes.
-// fs.watch(directory) on macOS fires for creation/rename but NOT for content
-// modifications to existing files — so we must watch each file individually.
-function watchFile(filePath) {
-  try {
-    fs.watch(filePath, () => readNewLines(filePath));
-  } catch (_) {}
+function watchFile(filePath, processor) {
+  try { fs.watch(filePath, () => readNewLines(filePath, processor)); } catch (_) {}
 }
 
-function watchSessionsDir(sessionsDir) {
-  try { if (!fs.statSync(sessionsDir).isDirectory()) return; } catch (_) { return; }
-  // Initialise cursors at current EOF and watch each existing file for appends
+function watchDir(dir, processor) {
+  try { if (!fs.statSync(dir).isDirectory()) return; } catch (_) { return; }
   try {
-    for (const f of fs.readdirSync(sessionsDir)) {
+    for (const f of fs.readdirSync(dir)) {
       if (!f.endsWith('.jsonl')) continue;
-      const fp = path.join(sessionsDir, f);
+      const fp = path.join(dir, f);
       cursors.set(fp, fs.statSync(fp).size);
-      watchFile(fp);
+      watchFile(fp, processor);
     }
   } catch (_) {}
-  // Watch directory for newly created session files
   try {
-    fs.watch(sessionsDir, (_, filename) => {
+    fs.watch(dir, (_, filename) => {
       if (!filename?.endsWith('.jsonl')) return;
-      const fp = path.join(sessionsDir, filename);
-      if (!cursors.has(fp)) {
-        cursors.set(fp, 0);
-        watchFile(fp);
-      }
-      readNewLines(fp);
+      const fp = path.join(dir, filename);
+      if (!cursors.has(fp)) { cursors.set(fp, 0); watchFile(fp, processor); }
+      readNewLines(fp, processor);
     });
-    process.stderr.write('[palah-openclaw] watching ' + sessionsDir + '\n');
+    process.stderr.write('[palah-watcher] watching ' + dir + '\n');
   } catch (_) {}
 }
 
-function watchAgentsDir(agentsDir) {
+function watchOpenClaw(agentsDir) {
   try { fs.statSync(agentsDir); } catch (_) {
-    process.stderr.write('[palah-openclaw] ~/.openclaw not found — watcher idle until OpenClaw is installed\n');
-    return;
+    process.stderr.write('[palah-watcher] openclaw not found — idle\n'); return;
   }
   try {
-    for (const agent of fs.readdirSync(agentsDir)) {
-      watchSessionsDir(path.join(agentsDir, agent, 'sessions'));
-    }
+    for (const agent of fs.readdirSync(agentsDir))
+      watchDir(path.join(agentsDir, agent, 'sessions'), processOpenClawLine);
   } catch (_) {}
   try {
     fs.watch(agentsDir, (_, agentName) => {
-      if (agentName) watchSessionsDir(path.join(agentsDir, agentName, 'sessions'));
+      if (agentName) watchDir(path.join(agentsDir, agentName, 'sessions'), processOpenClawLine);
     });
   } catch (_) {}
 }
 
-process.stderr.write('[palah-openclaw] session watcher starting\n');
-watchAgentsDir(AGENTS_DIR);
-process.stderr.write('[palah-openclaw] ready\n');
+function watchClaudeCode(projectsDir) {
+  try { fs.statSync(projectsDir); } catch (_) {
+    process.stderr.write('[palah-watcher] claude projects not found — idle\n'); return;
+  }
+  try {
+    for (const proj of fs.readdirSync(projectsDir))
+      watchDir(path.join(projectsDir, proj), processClaudeCodeLine);
+  } catch (_) {}
+  try {
+    fs.watch(projectsDir, (_, projName) => {
+      if (projName) watchDir(path.join(projectsDir, projName), processClaudeCodeLine);
+    });
+  } catch (_) {}
+}
+
+process.stderr.write('[palah-watcher] starting\n');
+watchOpenClaw(OPENCLAW_DIR);
+watchClaudeCode(CLAUDE_DIR);
+process.stderr.write('[palah-watcher] ready\n');
 """#
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
