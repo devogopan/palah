@@ -84,10 +84,41 @@ func timestamp() -> String {
 //   3. Implement read() — return (text, role) for the focused element
 //   4. Register it in AccessibilityReader.interceptors before GenericAXInterceptor
 
+// Whether the assistant is still producing its answer. Lets the poller avoid
+// finalising during a mid-response pause (e.g. while a web search runs, the
+// visible text goes stable for seconds but the answer isn't done).
+enum ResponseState {
+    case streaming   // assistant still working — do not finalise
+    case finished    // assistant done — safe to capture the final text
+    case unknown     // no reliable signal — fall back to text-stability heuristic
+}
+
+// A per-app description of where the transcript lives and how to tell when the
+// assistant has finished. Interceptors return one to opt an app into AX response
+// capture; the generic machinery in AccessibilityReader does the scanning, so
+// adding a new Electron app is just a new profile — no new traversal code.
+struct ResponseProfile {
+    var containerDesc:   String? = nil       // AXDescription to scope scanning to (nil = whole window)
+    var finishedMarker:  String? = nil       // AXStaticText substring meaning "assistant done"
+    var streamingMarker: String? = nil       // AXStaticText substring meaning "assistant still working"
+    var chrome:          Set<String> = []    // app-specific non-content strings to drop
+    // Turn markers enable transcript reconciliation — recovering a prompt+answer from
+    // the built transcript when the live input read was missed (e.g. cold-launch tree
+    // not ready). A transcript block starting with userTurnMarker begins a new turn.
+    var userTurnMarker:      String? = nil   // e.g. "You said:"
+    var assistantTurnMarker: String? = nil   // e.g. "Claude responded:"
+}
+
 protocol PromptInterceptor {
     var name: String { get }
     func canHandle(_ app: NSRunningApplication) -> Bool
     func read(from app: NSRunningApplication) -> (text: String?, role: String)
+    // Return a profile to enable AX response capture for this app; nil disables it.
+    func responseProfile(for app: NSRunningApplication) -> ResponseProfile?
+}
+
+extension PromptInterceptor {
+    func responseProfile(for app: NSRunningApplication) -> ResponseProfile? { nil }
 }
 
 // MARK: - Shared AX Helpers
@@ -270,6 +301,50 @@ struct VSCodeFamilyInterceptor: PromptInterceptor {
         guard let el = focusedElement(in: appEl) else { return (nil, "") }
         return (textFrom(el), role(of: el))
     }
+
+    // Response-capture profiles, keyed by bundle ID. Adding a new Electron chat app
+    // is just another entry here — the scanning/finalising logic is fully generic.
+    // Claude Desktop exposes a "Chat messages" container plus a live status line
+    // ("Claude is responding" → "…finished the response") that lets us finalise
+    // precisely; other apps get best-effort capture via the stability heuristic.
+    func responseProfile(for app: NSRunningApplication) -> ResponseProfile? {
+        switch app.bundleIdentifier {
+        case "com.anthropic.claudefordesktop":
+            return ResponseProfile(
+                containerDesc:   "Chat messages",
+                finishedMarker:  "finished the response",
+                streamingMarker: "Claude is responding",
+                chrome: ["You said:", "Claude responded:", "Thought process"],
+                userTurnMarker:      "You said:",
+                assistantTurnMarker: "Claude responded:")
+        case "com.openai.chat":
+            // Best-effort, untested: whole-window scan + stability finalisation.
+            // Add containerDesc/markers once verified against a live AX dump.
+            return ResponseProfile()
+        default:
+            // Code editors in this family (VS Code, Cursor, Windsurf, Zed) capture
+            // tool calls via hooks, not AX — don't scrape their editor as a response.
+            return nil
+        }
+    }
+}
+
+// Deep scan for an AXStaticText whose value contains `needle`. Bounded like the
+// other transcript scans so it can't stall the poll timer.
+private func containsStaticText(_ needle: String, in el: AXUIElement, visited: inout Int, depth: Int = 0) -> Bool {
+    guard depth < maxResponseDepth, visited < maxResponseScanNodes else { return false }
+    visited += 1
+    if role(of: el) == "AXStaticText",
+       let v = stringAttr(el, kAXValueAttribute as String), v.contains(needle) {
+        return true
+    }
+    var children: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children) == .success,
+          let childList = children as? [AXUIElement] else { return false }
+    for child in childList {
+        if containsStaticText(needle, in: child, visited: &visited, depth: depth + 1) { return true }
+    }
+    return false
 }
 
 // MARK: - Native AI Apps
@@ -333,6 +408,170 @@ private func isPlaceholder(_ text: String) -> Bool {
     return t.isEmpty || t.hasSuffix("…") || t.contains("⌘") || knownPlaceholders.contains(t)
 }
 
+// MARK: - Response Capture Helpers
+// Generic AX transcript scanning, driven entirely by a ResponseProfile so the same
+// code serves any Electron/native chat app.
+//
+// Depth cap is 80 (not 25): Electron transcript text lives very deep — in Claude
+// Desktop the message nodes sit at AX depth ~24 and their rendered text is several
+// levels below that. A shallow cap truncates exactly at the message boundary and
+// returns empty, which earlier looked (wrongly) like "the app hides response text."
+
+private let minResponseBlockLength = 12
+private let maxResponseScanNodes = 6000
+private let maxResponseDepth = 80
+
+// UI chrome present in every profile's transcript that is never message content.
+private let universalChromeStrings: Set<String> = [
+    "Use the up and down arrow keys to move between messages.",
+    "Claude is responding",
+    "Claude finished the response",
+    "Claude is AI and can make mistakes. Please double-check responses.",
+    "Claude is AI and can make mistakes. Please double-check responses",
+]
+
+// Returns the app's focused window element, or the app element itself as a fallback.
+// Works for background apps: AX focused-window is per-app, independent of system focus.
+private func focusedWindow(of appEl: AXUIElement) -> AXUIElement {
+    var winObj: AnyObject?
+    if AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &winObj) == .success,
+       let win = winObj { return (win as! AXUIElement) }
+    return appEl
+}
+
+// Reads transcript text blocks for `profile`, scoped to its container when set.
+// Enables Chromium's web-content AX tree first (deep text nodes).
+func readTranscriptBlocks(from app: NSRunningApplication, profile: ResponseProfile) -> [String] {
+    let appEl = axAppElement(for: app)
+    AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, true as CFTypeRef)
+    let root = focusedWindow(of: appEl)
+    let scanRoot = profile.containerDesc.flatMap { findByDescription($0, in: root) } ?? root
+    var blocks: [String] = []
+    var visited = 0
+    collectResponseBlocks(in: scanRoot, depth: 0, visited: &visited, into: &blocks)
+    return blocks
+}
+
+// A reconstructed conversation turn parsed from the transcript.
+struct TranscriptTurn {
+    let prompt: String
+    let answer: String
+}
+
+// Parses transcript blocks into (prompt, answer) turns using the profile's turn
+// markers. A block beginning with userTurnMarker starts a new turn; blocks up to the
+// next such marker are its content. Within a turn, the prompt is the text after the
+// marker; the answer is the remaining content (minus prompt echo, chrome, timestamps).
+func parseTranscriptTurns(_ blocks: [String], profile: ResponseProfile) -> [TranscriptTurn] {
+    guard let userMark = profile.userTurnMarker else { return [] }
+    let chrome = universalChromeStrings.union(profile.chrome)
+    let asstMark = profile.assistantTurnMarker
+
+    var turns: [TranscriptTurn] = []
+    var curPrompt: String? = nil
+    var curAnswer: [String] = []
+
+    func flush() {
+        guard let p = curPrompt else { return }
+        turns.append(TranscriptTurn(prompt: p, answer: curAnswer.joined(separator: "\n\n")))
+        curPrompt = nil; curAnswer = []
+    }
+
+    for raw in blocks {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix(userMark) {
+            flush()
+            curPrompt = String(t.dropFirst(userMark.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            continue
+        }
+        guard curPrompt != nil else { continue }               // preamble before first turn
+        if isTranscriptNoise(t) || chrome.contains(t) { continue }
+        if t == curPrompt { continue }                          // prompt echoed as its own block
+        var line = t
+        if let am = asstMark, line.hasPrefix(am) {              // strip "Claude responded:" prefix
+            line = String(line.dropFirst(am.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if !line.isEmpty { curAnswer.append(line) }
+    }
+    flush()
+    return turns
+}
+
+// Reads the assistant's streaming state from the profile's marker strings.
+func responseState(of app: NSRunningApplication, profile: ResponseProfile) -> ResponseState {
+    guard profile.finishedMarker != nil || profile.streamingMarker != nil else { return .unknown }
+    let root = focusedWindow(of: axAppElement(for: app))
+    if let fm = profile.finishedMarker {
+        var v = 0
+        if containsStaticText(fm, in: root, visited: &v) { return .finished }
+    }
+    if let sm = profile.streamingMarker {
+        var v = 0
+        if containsStaticText(sm, in: root, visited: &v) { return .streaming }
+    }
+    return .unknown
+}
+
+// True for blocks that are transcript furniture rather than message content:
+// relative timestamps ("14 minutes ago", "just now") that update on every read.
+private func isTranscriptNoise(_ s: String) -> Bool {
+    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    if t == "just now" { return true }
+    let parts = t.split(separator: " ")
+    if parts.count == 3, Int(parts[0]) != nil, parts[2] == "ago",
+       ["second","seconds","minute","minutes","hour","hours","day","days"].contains(String(parts[1])) {
+        return true
+    }
+    return false
+}
+
+private func collectResponseBlocks(in el: AXUIElement, depth: Int, visited: inout Int,
+                                    into blocks: inout [String]) {
+    guard depth < maxResponseDepth, visited < maxResponseScanNodes else { return }
+    visited += 1
+
+    let r = role(of: el)
+    if textInputRoles.contains(r) { return }   // never descend into the prompt input
+
+    if r == "AXStaticText" {
+        var value: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &value) == .success,
+           let text = value as? String, text.count >= minResponseBlockLength {
+            blocks.append(text)
+        }
+    }
+
+    var children: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children) == .success,
+          let childList = children as? [AXUIElement] else { return }
+    for child in childList {
+        collectResponseBlocks(in: child, depth: depth + 1, visited: &visited, into: &blocks)
+    }
+}
+
+// Finds the first descendant whose AXDescription matches `desc` (e.g. "Chat messages").
+// Scoping the transcript scan to this container excludes the sidebar chat-history
+// list and onboarding cards, which otherwise leak in as false "responses".
+private func findByDescription(_ desc: String, in el: AXUIElement, depth: Int = 0) -> AXUIElement? {
+    guard depth < maxResponseDepth else { return nil }
+    if stringAttr(el, kAXDescriptionAttribute as String) == desc { return el }
+    var children: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children) == .success,
+          let childList = children as? [AXUIElement] else { return nil }
+    for child in childList {
+        if let found = findByDescription(desc, in: child, depth: depth + 1) { return found }
+    }
+    return nil
+}
+
+// Reads a single string AX attribute (value/description/title/…). Used by the
+// container-finder and marker scans.
+private func stringAttr(_ el: AXUIElement, _ attr: String) -> String? {
+    var v: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, attr as CFString, &v) == .success else { return nil }
+    return v as? String
+}
+
 // MARK: - AccessibilityReader
 
 class AccessibilityReader {
@@ -353,6 +592,48 @@ class AccessibilityReader {
     private var wasInInput = false  // was previous tick focused on a text input role?
     private var timer: Timer?
 
+    // Response-capture state. Watching starts on submit and continues in the
+    // BACKGROUND — keyed to the app that was submitted to, not the frontmost app —
+    // so switching away mid-answer doesn't lose the capture. It ends when the
+    // assistant signals finished (or the text stabilises), the watchdog fires, or
+    // the watched app quits.
+    private var awaitingResponseSessionId = ""
+    private var awaitingResponseApp = ""                 // display name, for logging
+    private var awaitingResponseRunningApp: NSRunningApplication?  // polled in background
+    private var awaitingResponseProfile: ResponseProfile?
+    private var awaitingResponsePrompt = ""              // submitted prompt, to strip its echo
+    private var baselineBlocks: Set<String> = []         // transcript blocks present at submit
+    private var lastResponseText = ""
+    private var lastResponseCaptured = ""                // last response text logged (dedup)
+    private var responseStablePolls = 0                  // consecutive unchanged polls
+    private var responseWatchPolls = 0                   // total polls since watch began
+
+    // Response polling runs at ~1 Hz (every 5th 0.2s tick) rather than 5 Hz — an
+    // answer streams over seconds, so 1 Hz is ample and cuts the deep-scan cost 5×.
+    private var pollDivider = 0
+    private let responsePollEveryNTicks = 5
+    private let responseFinishedStability = 2    // polls (~2s) once state == .finished
+    private let responseUnknownStability = 4     // polls (~4s) for apps with no finished-signal
+    private let responseMaxWatchPolls = 240      // ~240s hard cap, then finalise anyway
+    private let minResponseLength = 20
+
+    // Transcript reconciliation — recovers a prompt+answer that the live path missed
+    // (e.g. the first prompt after a cold Claude launch, when the AX tree wasn't built
+    // and the input value read back empty). Palah isn't a real-time blocker, so
+    // capturing the turn a few seconds late — once the answer renders and the tree is
+    // fully built — is fine.
+    private var capturedPromptKeys: Set<String> = []   // normalised prompts already captured
+    private var pendingReconcileApp: NSRunningApplication?
+    private var pendingReconcileProfile: ResponseProfile?
+    private var pendingReconcileName = ""
+    private var pendingReconcilePolls = 0
+    private let reconcileMaxPolls = 120                 // ~120s to give up waiting for the answer
+
+    // Normalises a prompt into a dedup key (trim + collapse whitespace + lowercase).
+    private func promptKey(_ s: String) -> String {
+        s.lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
     func start() {
         try? "".write(toFile: logPath, atomically: true, encoding: .utf8)
         log("[\(timestamp())] Palah started — watching native AI apps and IDE plugins")
@@ -360,14 +641,68 @@ class AccessibilityReader {
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         AXIsProcessTrustedWithOptions(opts)
 
+        // Enable Chromium's accessibility tree early for Electron AI apps, so it's
+        // fully built before the user types. Without this, the FIRST prompt after an
+        // app (re)launch is missed — the input's AX value stays frozen at the
+        // placeholder for several seconds until the tree finishes building.
+        // (No-op if permission isn't granted yet; re-run on permission grant below.)
+        warmUpElectronAccessibility()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            // The app's window isn't rendered the instant it launches, so a single
+            // warm-up can miss. Retry across the first ~3s so the tree is force-built
+            // before the user clicks in and types their first prompt.
+            for delay in [0.0, 0.5, 1.0, 1.5, 2.2, 3.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.enableElectronAccessibility(for: app)
+                }
+            }
+        }
+
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             guard let self else { return }
             guard AXIsProcessTrusted() else {
                 log("[\(timestamp())] waiting for Accessibility permission...")
                 return
             }
+            // AX calls are no-ops without permission, so the startup warm-up above
+            // does nothing when Palah launches unauthorised (e.g. after a tccutil
+            // reset). Re-run it the moment permission is first granted, so already-
+            // running Electron apps get their tree built before the first prompt.
+            if !self.didWarmUpOnTrust {
+                self.didWarmUpOnTrust = true
+                self.warmUpElectronAccessibility()
+            }
             self.tick()
         }
+    }
+
+    private var didWarmUpOnTrust = false
+
+    // Sets AXManualAccessibility on every currently-running Electron AI app.
+    private func warmUpElectronAccessibility() {
+        for app in NSWorkspace.shared.runningApplications {
+            enableElectronAccessibility(for: app)
+        }
+    }
+
+    // Enables AND force-builds Chromium's AX tree for an Electron AI app. Setting
+    // AXManualAccessibility only *enables* accessibility; Chromium builds the tree
+    // lazily, when something actually reads it. So we also traverse the tree here to
+    // force serialization now — otherwise the first prompt after launch races the
+    // build and its input value comes back empty/placeholder (text not yet in tree).
+    // Called at startup, on permission grant, on app launch, and on switch-to.
+    private func enableElectronAccessibility(for app: NSRunningApplication) {
+        guard vscodeFamilyBundleIDs.contains(app.bundleIdentifier ?? "") else { return }
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, true as CFTypeRef)
+        // Read the tree to force the build (result discarded).
+        var blocks: [String] = []
+        var visited = 0
+        collectResponseBlocks(in: focusedWindow(of: appEl), depth: 0, visited: &visited, into: &blocks)
     }
 
     private func tick() {
@@ -384,6 +719,12 @@ class AccessibilityReader {
             lastInputRole = ""
             lastText = ""
             wasInInput = false
+            // Force-build the tree on switch-to, covering the case where the window
+            // was reopened without a fresh process launch (no didLaunch event).
+            enableElectronAccessibility(for: app)
+            // NB: response-watch state is intentionally NOT reset here — a response
+            // is polled in the background against its own app, so switching focus
+            // away (or to another AI app) must not drop the in-flight capture.
         }
 
         if !role.isEmpty, role != lastRole {
@@ -402,9 +743,10 @@ class AccessibilityReader {
         // Submit detection — two patterns:
         // A) Field clears while still focused (VS Code chat, ChatGPT web)
         // B) Focus leaves the input entirely (Claude Desktop: AXTextArea → AXButton → AXWebArea)
+        let fieldCleared = inInput  && isPlaceholder(captured)
+        let leftInput    = !inInput && wasInInput
+        var firedRealtimeSubmit = false
         if hadContent {
-            let fieldCleared = inInput  && isPlaceholder(captured)
-            let leftInput    = !inInput && wasInInput
             if fieldCleared || leftInput {
                 let text  = lastText
                 let words = text.split(separator: " ").count
@@ -444,16 +786,191 @@ class AccessibilityReader {
                     "preview":     String(text.prefix(120)),
                 ])
                 lastCaptured = text
+                capturedPromptKeys.insert(promptKey(text))
+                firedRealtimeSubmit = true
+
+                // Begin a background response watch for this app, if it opts in via a
+                // profile. Snapshot the transcript blocks now (pre-answer baseline) so
+                // later reads can isolate just the newly-added turn.
+                if let profile = interceptor.responseProfile(for: app) {
+                    baselineBlocks = Set(readTranscriptBlocks(from: app, profile: profile))
+                    awaitingResponseSessionId = pseudoSessionId
+                    awaitingResponseApp = appName
+                    awaitingResponseRunningApp = app
+                    awaitingResponseProfile = profile
+                    awaitingResponsePrompt = text
+                    lastResponseText = ""
+                    responseStablePolls = 0
+                    responseWatchPolls = 0
+                }
             }
         }
 
-        // Only update lastText when focused on an input — freeze it while in response area
-        // so the prompt survives until we can detect the submit.
+        // Missed-submit → reconciliation. Focus left the input but we captured nothing
+        // live (e.g. cold-launch: the input value read back as the placeholder). Flag a
+        // reconcile so we recover the turn from the transcript once the answer renders.
+        if leftInput, !firedRealtimeSubmit,
+           let profile = interceptor.responseProfile(for: app), profile.userTurnMarker != nil {
+            pendingReconcileApp = app
+            pendingReconcileProfile = profile
+            pendingReconcileName = appName
+            pendingReconcilePolls = 0
+        }
+
+        // Update prompt-tracking state before the (throttled) background response poll.
+        // Only update lastText when focused on an input — freeze it while in the
+        // response area so the prompt survives until we can detect the submit.
         if inInput {
             lastText = captured
             lastInputRole = role
         }
         wasInInput = inInput
+
+        // Response polling is throttled to ~1 Hz and runs against the watched app,
+        // independent of which app is currently frontmost.
+        pollDivider += 1
+        if pollDivider % responsePollEveryNTicks == 0 {
+            pollResponse()
+            pollReconcile()
+        }
     }
 
+    // Polls the watched app's transcript in the background (~1 Hz) and logs the new
+    // turn once the assistant signals it has finished (or the text stabilises for an
+    // app without a finished-signal). Isolates the new turn by set-differencing the
+    // current transcript blocks against the pre-submit baseline, so prior turns and
+    // stable chrome are excluded and only the fresh answer remains.
+    private func pollResponse() {
+        guard !awaitingResponseSessionId.isEmpty,
+              let app = awaitingResponseRunningApp,
+              let profile = awaitingResponseProfile else { return }
+
+        // Watched app quit — abandon the watch.
+        if app.isTerminated { endResponseWatch(); return }
+
+        responseWatchPolls += 1
+
+        // New turn = blocks not present at submit, minus timestamps, chrome, and the
+        // echoed prompt. Order-preserved.
+        let promptTrimmed = awaitingResponsePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chrome = universalChromeStrings.union(profile.chrome)
+        let newBlocks = readTranscriptBlocks(from: app, profile: profile).filter { block in
+            let t = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !baselineBlocks.contains(block)
+                && !isTranscriptNoise(block)
+                && !chrome.contains(t)
+                && t != promptTrimmed
+        }
+        let candidate = newBlocks.joined(separator: "\n\n")
+
+        // Track stability.
+        if candidate == lastResponseText {
+            responseStablePolls += 1
+        } else {
+            lastResponseText = candidate
+            responseStablePolls = 0
+        }
+
+        // Finalise based on the assistant's own state where available.
+        let watchdogHit = responseWatchPolls >= responseMaxWatchPolls
+        let readyToFinalise: Bool
+        switch responseState(of: app, profile: profile) {
+        case .streaming:
+            readyToFinalise = watchdogHit            // never finalise mid-stream
+        case .finished:
+            readyToFinalise = responseStablePolls >= responseFinishedStability || watchdogHit
+        case .unknown:
+            readyToFinalise = responseStablePolls >= responseUnknownStability || watchdogHit
+        }
+
+        guard readyToFinalise, candidate.count >= minResponseLength,
+              candidate != lastResponseCaptured else { return }
+
+        let sessionId = awaitingResponseSessionId
+        let appName = awaitingResponseApp
+        let words = candidate.split(separator: " ").count
+        // Canonical answer schema — matches the hook/extension "ai_response" event
+        // (PromptServer) so downstream tooling sees one shape across all sources.
+        // Tokens/url aren't exposed via AX, so they're null/empty here.
+        let base: [String: Any] = [
+            "ts":            timestamp(),
+            "event":         "ai_response",
+            "source":        "ax",
+            "app":           appName,
+            "session_id":    sessionId,
+            "url":           "",
+            "words":         words,
+            "input_tokens":  NSNull(),
+            "output_tokens": NSNull(),
+        ]
+        let pid = logPayload(base.merging(["text": candidate]) { $1 })
+        sessions.recordResponse(sessionId: sessionId, words: words, payloadId: pid)
+        logJSON(base.merging([
+            "preview":    String(candidate.prefix(120)),
+            "payload_id": pid,
+        ]) { $1 })
+        lastResponseCaptured = candidate
+        endResponseWatch()
+    }
+
+    private func endResponseWatch() {
+        awaitingResponseSessionId = ""
+        awaitingResponseRunningApp = nil
+        awaitingResponseProfile = nil
+        baselineBlocks = []
+    }
+
+    // Recovers a missed turn from the built transcript. Runs after a submit we couldn't
+    // capture live (pendingReconcile*). Waits until the assistant has finished, then
+    // parses the last transcript turn; if its prompt is new (not already captured live),
+    // logs both the prompt and the answer. Deduped by promptKey so it never duplicates.
+    private func pollReconcile() {
+        guard let app = pendingReconcileApp, let profile = pendingReconcileProfile else { return }
+        if app.isTerminated { clearPendingReconcile(); return }
+        pendingReconcilePolls += 1
+        if pendingReconcilePolls > reconcileMaxPolls { clearPendingReconcile(); return }
+
+        // Let the answer finish rendering so it's fully in the transcript.
+        if responseState(of: app, profile: profile) == .streaming { return }
+
+        let turns = parseTranscriptTurns(readTranscriptBlocks(from: app, profile: profile), profile: profile)
+        guard let last = turns.last else { return }   // tree not built / transcript empty yet — keep waiting
+        let key = promptKey(last.prompt)
+        guard !key.isEmpty, last.prompt.count >= 3 else { clearPendingReconcile(); return }
+        if capturedPromptKeys.contains(key) { clearPendingReconcile(); return }   // live path got it
+        guard !last.answer.isEmpty else { return }    // answer not rendered yet — keep waiting
+
+        // Log the recovered turn as its own AX session (source "ax-recon").
+        let tsFmt = DateFormatter(); tsFmt.dateFormat = "yyyyMMdd-HHmmss"
+        let sessionId = "ax-recon-\(tsFmt.string(from: Date()))"
+        sessions.openSession(sessionId: sessionId, app: pendingReconcileName,
+                             meta: ["source": "ax-recon"])
+        sessions.advanceTurn(sessionId: sessionId, app: pendingReconcileName)
+
+        let pWords = last.prompt.split(separator: " ").count
+        let pPid = logPayload(["ts": timestamp(), "event": "submit", "source": "ax-recon",
+                               "app": pendingReconcileName, "session_id": sessionId,
+                               "words": pWords, "text": last.prompt])
+        sessions.recordPrompt(sessionId: sessionId, words: pWords, model: "", payloadId: pPid)
+        logJSON(["ts": timestamp(), "event": "submit", "source": "ax-recon",
+                 "app": pendingReconcileName, "session_id": sessionId,
+                 "words": pWords, "preview": String(last.prompt.prefix(120))])
+
+        let aWords = last.answer.split(separator: " ").count
+        let aBase: [String: Any] = ["ts": timestamp(), "event": "ai_response", "source": "ax-recon",
+                                    "app": pendingReconcileName, "session_id": sessionId, "url": "",
+                                    "words": aWords, "input_tokens": NSNull(), "output_tokens": NSNull()]
+        let aPid = logPayload(aBase.merging(["text": last.answer]) { $1 })
+        sessions.recordResponse(sessionId: sessionId, words: aWords, payloadId: aPid)
+        logJSON(aBase.merging(["preview": String(last.answer.prefix(120)), "payload_id": aPid]) { $1 })
+
+        capturedPromptKeys.insert(key)
+        clearPendingReconcile()
+    }
+
+    private func clearPendingReconcile() {
+        pendingReconcileApp = nil
+        pendingReconcileProfile = nil
+        pendingReconcilePolls = 0
+    }
 }

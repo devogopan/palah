@@ -10,6 +10,10 @@ build/
 *.dSYM.zip
 *.dSYM
 
+# Code coverage / profiling artifacts (regenerated every run)
+*.profraw
+*.profdata
+
 # macOS
 .DS_Store
 

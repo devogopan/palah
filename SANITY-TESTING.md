@@ -126,25 +126,46 @@ D=$(ls -dt /tmp/palah-sessions/$(date +%Y-%m-%d)/*/*/ | head -1); echo "$D"; cat
 
 ---
 
-## Test 1 — AX Capture: Claude Desktop ⚠️ BROKEN (app-side regression)
+## Test 1 — AX Capture: Claude Desktop (prompt + response)
 
 **App:** Claude for Mac (`/Applications/Claude.app`)
 
-> **Status (2026-06-29):** No longer capturable via AX. Current Claude Desktop
-> builds (Electron 42 / Chromium) expose **no focused UI element** to the
-> Accessibility API — `kAXFocusedUIElementAttribute` returns nil on every tick,
-> so no `field:` role is ever seen and no text can be read. Same class of gap as
-> VS Code Copilot Chat (Chromium `EditContext`). Not fixable from Palah via AX.
-> Capture would require hooks (Claude Desktop has none) or network interception
-> (enterprise-gateway model, out of scope).
+| Step | Action |
+|---|---|
+| 1 | Open Claude for Mac, open chat |
+| 2 | Type: `what is the capital of france` |
+| 3 | Press Enter to send |
+| 4 | Wait for the answer to fully render |
 
-**Diagnostic (to re-check after a Claude Desktop update):**
-```bash
-tail -f /tmp/palah.log | grep -i "claude\|field:"
-# Focus Claude Desktop and type. If a `field: AXTextArea` line appears, AX is
-# working again and this test can be restored. If only `→ Claude [VSCode Family]`
-# appears with no field line, the gap persists.
+**Expected log entries** — a `submit`, then an `ai_response` once Claude finishes:
+```json
+{"event":"submit","source":"ax","app":"Claude","interceptor":"VSCode Family","role":"AXTextArea"}
+{"event":"ai_response","source":"ax","app":"Claude","words":42}
 ```
+Full text lands in `/tmp/palah-sessions/<date>/claude/ax-<timestamp>/turn-001.ndjson`.
+
+> **Status (2026-07-11):** Prompt **and response** capture WORKING.
+> - **Prompts** capture via the input `AXTextArea` value.
+> - **Responses** capture by scanning the `"Chat messages"` AX container (depth up
+>   to 80 — the message text lives ~24+ levels deep) and finalising when Claude's
+>   status line flips to `"finished the response"`. Emitted as `ai_response`,
+>   the same event other sources use.
+> - Capture continues **in the background** — you can switch apps mid-answer.
+> - **Not captured:** tool *calls* as structured events. Tool activity only appears
+>   as inline text in the response (e.g. `"Searched the web"`); there is no
+>   AX-exposed tool_pre/tool_post for Claude Desktop.
+
+**First-prompt-after-cold-launch (transcript reconciliation):** the very first prompt
+after fully quitting + reopening Claude can't be read live — Chromium builds its AX
+tree lazily and the input value stays frozen at the `"Write a message…"` placeholder
+until the first response renders. Palah handles this by **reconciliation**: when it
+sees you leave the input (a probable submit) but captured nothing live, it waits for
+the answer to render, then recovers the prompt + answer from the transcript and logs
+them with `source:"ax-recon"` (deduped against live captures). To verify: quit Claude,
+reopen, immediately send a prompt, and **wait for the answer** — an `ax-recon` `submit`
+and `ai_response` should appear in `/tmp/palah.log` a few seconds after the answer.
+
+**Backspace test:** type `"lo"` and delete with backspace — no submit should log.
 
 ---
 
@@ -405,7 +426,7 @@ Expected: `mcp_pre` / `mcp_post` events with `"mcp_server":"github"`.
 
 | # | Method | App | Status | Notes |
 |---|---|---|---|---|
-| 1 | AX | Claude Desktop | ⚠️ Broken | App-side regression — no AX focused element (see Test 1) |
+| 1 | AX | Claude Desktop | ✅ Pass | Prompt + response (`ai_response`) captured; first-prompt-after-launch fixed 2026-07-11. Tool calls not captured (activity text only) |
 | 2 | AX | VS Code | ☐ Pass / ☐ Fail | |
 | 3 | AX | Safari | ☐ Pass / ☐ Fail | |
 | 4 | Extension | Chrome (claude.ai) | ☐ Pass / ☐ Fail | |
@@ -426,11 +447,11 @@ Expected: `mcp_pre` / `mcp_post` events with `"mcp_server":"github"`.
 
 | Gap | Reason | Workaround |
 |---|---|---|
-| Claude Desktop (native) | Current Electron/Chromium build exposes no focused AX element (EditContext) | Use Claude Code hooks / claude.ai in browser (extension); native Desktop not capturable |
+| Claude Desktop — tool calls | Electron/Chromium exposes no AX tool_pre/tool_post; tool use only appears as inline activity text (e.g. "Searched the web") | Use Claude Code hooks for structured tool events; AX captures prompt + response text |
 | GitHub Copilot | No hooks API, no cert-free intercept | Enterprise gateway model only |
 | Cursor built-in subscription AI (non-Sonnet) | Same process, no hook for non-API path | AX capture gets the prompt text |
 | Short prompts < 3 chars via AX | Filtered to prevent backspace false positives | Hooks capture these correctly |
-| AX capture requires app to be frontmost | macOS AX limitation | Hooks cover background sessions |
+| AX prompt capture requires app to be frontmost at submit | macOS AX polls the frontmost app | Response capture then continues in the background (polled by pid); hooks cover fully-background sessions |
 | Safari Web Extension (responses, tokens) | Unsigned-extension friction blocks native messaging | AX (Test 3) captures Safari prompts; sign the extension to enable richer capture |
 
 ---

@@ -34,6 +34,7 @@ final class SessionManager {
         let tsStart: String
         var tsEnd:   String = ""
         var promptWords:     Int    = 0
+        var responseWords:   Int    = 0
         var model:           String = ""
         var effort:          String = ""
         var tools:           [String] = []
@@ -160,6 +161,13 @@ final class SessionManager {
         accumulators[sessionId]!.payloadIds.append(payloadId)
     }
 
+    func recordResponse(sessionId: String, words: Int, payloadId: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard accumulators[sessionId] != nil else { return }
+        accumulators[sessionId]!.responseWords = words
+        accumulators[sessionId]!.payloadIds.append(payloadId)
+    }
+
     func recordToolUse(sessionId: String, tool: String, durationMs: Int,
                        effort: String, payloadId: String) {
         lock.lock(); defer { lock.unlock() }
@@ -196,6 +204,7 @@ final class SessionManager {
             "ts_start":          acc.tsStart,
             "ts_end":            acc.tsEnd,
             "prompt_words":      acc.promptWords,
+            "response_words":    acc.responseWords,
             "model":             acc.model,
             "effort":            acc.effort,
             "tools":             acc.tools,
