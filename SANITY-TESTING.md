@@ -11,7 +11,17 @@ Run this checklist after every build or config change to confirm all capture met
 curl -s http://localhost:45678/health
 # Expected: {"status":"ok","server":"palah","port":45678}
 
-# 2. Clear log and start watching
+# 2. Check + auto-heal all components (Palah.app, relay, openclaw watcher) in one shot:
+./scripts/palah-doctor.sh
+
+# Or start the relay by hand (proxies ANTHROPIC_BASE_URL / OPENAI_BASE_URL traffic,
+# forwards to the real upstream, notifies Palah on :45678 for each request). Not
+# managed by launchd — does not survive a reboot or terminal restart:
+node scripts/palah-relay.js &
+export ANTHROPIC_BASE_URL=http://localhost:45679
+export OPENAI_BASE_URL=http://localhost:45679
+
+# 3. Clear log and start watching
 > /tmp/palah.log && tail -f /tmp/palah.log
 ```
 
