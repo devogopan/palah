@@ -8,7 +8,7 @@ Run this checklist after every build or config change to confirm all capture met
 
 ```bash
 # 1. Confirm Palah is running (menu bar icon visible)
-curl -s http://localhost:45678/health
+curl -v -s http://localhost:45678/health
 # Expected: {"status":"ok","server":"palah","port":45678}
 
 # 2. Check + auto-heal all components (Palah.app, relay, openclaw watcher) in one shot:
@@ -174,6 +174,8 @@ the answer to render, then recovers the prompt + answer from the transcript and 
 them with `source:"ax-recon"` (deduped against live captures). To verify: quit Claude,
 reopen, immediately send a prompt, and **wait for the answer** — an `ax-recon` `submit`
 and `ai_response` should appear in `/tmp/palah.log` a few seconds after the answer.
+
+Note: Do see "ax-recon" does not work some time.
 
 **Backspace test:** type `"lo"` and delete with backspace — no submit should log.
 
